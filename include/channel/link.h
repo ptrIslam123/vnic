@@ -5,8 +5,20 @@
 
 namespace vnic {
 
-class Link : public soft::Channel<Packet> {
+struct Sizeof {
+    std::size_t operator() (const Packet& packet) const {
+        std::size_t bytes{0};
+        packet.forEachSegment([&](const Packet& packet) {
+            bytes += packet.length;
+            return true;
+        });
+        return bytes;
+    }
+};
+
+class Link : public soft::Channel<Packet, Sizeof> {
 public:
+    struct Config : soft::Channel<Packet, Sizeof>::Config {};
 
 private:
 };

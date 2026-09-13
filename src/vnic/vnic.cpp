@@ -9,7 +9,7 @@ namespace {
 namespace vnic {
 
 void VNic::rx(Packet&& packet) {
-    link_.enqueue(std::move(packet));
+    link_.put(std::move(packet));
 }
 
 bool VNic::validate(const Packet& packet) const {
@@ -38,8 +38,12 @@ void VNic::distribute(Packet&& packet) {
     }
 }
 
-void VNic::notify_rx() {
-    //TODO
+bool VNic::upLink() {
+    return link_.up();
+}
+
+bool VNic::downLink() {
+    return link_.down();
 }
 
 bool VNic::initReta() {
@@ -91,16 +95,10 @@ bool VNic::configure(const Config& config) {
 
 bool VNic::configureQueues() {
     rxQueues_.clear();
-    rxQueues_.reserve(config_.rxQueueCount);
-    for (decltype(config_.rxQueueCount) i{0}; i < config_.rxQueueCount; ++i) {
-        rxQueues_.emplace({});
-    }
+    rxQueues_.resize(config_.rxQueueCount);
 
     txQueues_.clear();
-    txQueues_.reserve(config_.txQueueCount);
-    for (decltype(config_.txQueueCount) i{0}; i < config_.txQueueCount; ++i) {
-        txQueues_.emplace({});
-    }
+    txQueues_.resize(config_.txQueueCount);
     return true;
 }
 
@@ -118,46 +116,53 @@ bool VNic::configureRss() {
 }
 
 bool VNic::configureLink() {
-    return false;
+    return link_.configure(config_.link);
 }
 
-bool VNic::configure(const std::uint16_t queueId, const RxQueue::Config& config) {
+bool VNic::configureQueue(const std::uint16_t queueId, const RxQueue::Config& config) {
     if (queueId >= rxQueues_.size()) [[unlikely]] {
         return false;
     }
-
     return rxQueues_[queueId].configure(config);
 }
 
-bool VNic::configure(const std::uint16_t queueId, const TxQueue::Config& config) {
+bool VNic::configureQueue(const std::uint16_t queueId, const TxQueue::Config& config) {
     if (queueId >= txQueues_.size()) [[unlikely]] {
         return false;
     }
-
     return txQueues_[queueId].configure(config);
 }
 
 bool VNic::start() {
-    if (startQueues()) [[unlikely]] {
+    if (!startQueues()) [[unlikely]] {
         return false;
     }
 
+    setState(State::Started);
+
+    std::vector<Packet> packets;
+    packets.reserve(32);
+
     while (getState() == State::Started) {
-        auto&& packet{link_.dequeue()}; // blocking call
-        if (!validate(packet)) [[unlikely]] {
-            continue;
-        }
+        packets.clear();
+        (void)link_.get(packets); // blocking call
+        assert(!packets.empty());
 
-        if (!l2Filter(packet)) [[unlikely]] {
-            continue;
-        }
+        for (auto& packet : packets) {
+            if (!validate(packet)) [[unlikely]] {
+                continue;
+            }
 
-        if (!softOffloads(packet)) [[unlikely]] {
-            continue;
-        }
+            if (!l2Filter(packet)) [[unlikely]] {
+                continue;
+            }
 
-        distribute(std::move(packet));
-        notify_rx();
+            if (!softOffloads(packet)) [[unlikely]] {
+                continue;
+            }
+
+            distribute(std::move(packet));
+        }
     }
     return true;
 }
@@ -194,12 +199,12 @@ bool VNic::stop() {
     return true;
 }
 
-bool VNic::updateReta(Config::RssConfig::Reta&& reta) {
+bool VNic::updateReta(Config::Rss::Reta&& reta) {
     return false; //TODO
 }
 
-bool VNic::updateReta(const Config::RssConfig::Reta& reta) {
-    return updateReta(Config::RssConfig::Reta{reta});
+bool VNic::updateReta(const Config::Rss::Reta& reta) {
+    return updateReta(Config::Rss::Reta{reta});
 }
 
 void VNic::resetStats() {
@@ -210,8 +215,16 @@ const stats::Stats& VNic::getStats() const {
     return stats_;
 }
 
+enum VNic::State VNic::getState() const {
+    return state_;
+}
+
 enum VNic::ErrorCode VNic::getErrorCode() const {
     return eCode_;
+}
+
+const VNic::Config::Rss::Reta& VNic::getReta() const {
+    return reta_;
 }
 
 const VNic::Config& VNic::getConfig() const {
@@ -226,6 +239,10 @@ const RxQueue& VNic::getRxQueue(std::uint16_t queueId) const {
 const TxQueue& VNic::getTxQueue(std::uint16_t queueId) const {
     assert(queueId < txQueues_.size());
     return txQueues_[queueId];
+}
+
+void VNic::setState(State state) {
+    state_ = state;
 }
 
 } // namespace vnic

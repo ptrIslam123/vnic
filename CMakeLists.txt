@@ -3,9 +3,10 @@ cmake_minimum_required(VERSION 3.16)
 project(vnic)
 
 
-file(GLOB_RECURSE SRC "src/*.cpp" "include/*.h")
+file(GLOB_RECURSE SRC "src/*.cpp")
+file(GLOB_RECURSE HEADERS "include/*.h")
 
-add_executable(${PROJECT_NAME} ${SRC})
+add_executable(${PROJECT_NAME} ${SRC} ${HEADERS})
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR} "${CMAKE_SOURCE_DIR}/include")
 

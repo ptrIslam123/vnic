@@ -1,5 +1,6 @@
 #pragma once
 
+#include "memory/memory_pool.h"
 #include "queue/fifo.h"
 #include "packet/packet.h"
 #include "stats/stats.h"
@@ -11,56 +12,42 @@ public:
     struct Config {
         std::uint32_t queueId;           // Идентификатор очереди (0, 1, 2, ...)
         std::uint32_t socketId;          // NUMA-узел для выделения памяти
-        std::uint32_t size;             // Количество дескрипторов (размер кольцевого буфера)
-
-        struct Thresholds {
-            uint32_t prefetch;      // Когда начинать подгружать дескрипторы
-            uint32_t host;          // Когда драйвер забирает дескрипторы
-            uint32_t writeBack;     // Когда обновлять статус дескрипторов
-        } thresholds;
-
-        // --- УПРАВЛЕНИЕ ПАМЯТЬЮ ---
-        uint32_t freeThreshold;     // Минимальное кол-во свободных дескрипторов
-        // для освобождения буферов
-        void* mempool;              // Пул буферов для пакетов (для Rx очереди)
-        // Для Tx может быть nullptr
+        std::uint32_t size;              // Количество дескрипторов (размер кольцевого буфера)
     };
 
-    // Кольцевой буфер (дескрипторы)
-    struct Descriptor {
-        void* buffer;           // Указатель на буфер п акета
-        std::uint32_t length;        // Длина данных в буфере
-        std::uint64_t timestamp;     // Временная метка (если поддерживается)
-        std::uint32_t flags;         // Статус, оффлоады и т.д.
-    };
-
-    bool configure(const Config& config);
-    bool start();
-    bool stop();
-
-private:
-    Fifo<Descriptor> free_;
-    Fifo<Descriptor> used_;
-    stats::Stats stats_;
-};
-
-class RxQueue final {
-public:
-    struct Config : Queue::Config {
-        struct Offloads {
-            // Rx оффлоады
-            bool checksumIp;
-            bool checksumTcp;
-            bool checksumUdp;
-            bool vlanStrip;
-            bool timestamp;
-        } offloads;
-    };
-
+    Queue() {};
+    Queue(const Queue& other) {}
+    Queue& operator=(const Queue& other) {
+        return *this;
+    }
     bool configure(const Config& config);
     bool start();
     bool stop();
     void push(Packet&& packet);
+
+    const Config& getConfig() const;
+    const stats::Stats& getStats() const;
+
+private:
+    void notifyRxListener();
+
+    Fifo<PacketDescriptor> free_;
+    Fifo<PacketDescriptor> used_;
+    stats::Stats stats_;
+    memory::Pool memory_;
+    Config config_;
+};
+
+class RxQueue final {
+public:
+    struct Config : Queue::Config {};
+
+    bool configure(const Config& config) { return queue_.configure(config); }
+    bool start() { return queue_.start(); }
+    bool stop() { return queue_.stop(); }
+    void push(Packet&& packet) { return queue_.push(std::move(packet)); }
+
+    const stats::Stats& getStats() const { return queue_.getStats(); }
 
 private:
     Queue queue_;
@@ -68,18 +55,16 @@ private:
 
 class TxQueue final {
 public:
-    struct Config : Queue::Config {
-        struct Offloads {
-            // Tx оффлоады
-            bool tso;
-            bool vlanInsert;
-            bool multiSeg;
-        } offloads;
-    };
+    struct Config : Queue::Config {};
 
-    bool configure(const Config& config);
-    bool start();
-    bool stop();
+    bool configure(const Config& config) { return queue_.configure(config); }
+    bool start() { return queue_.start(); }
+    bool stop() { return queue_.stop(); }
+    void push(Packet&& packet) {
+        //!TODO
+    }
+
+    const stats::Stats& getStats() const { return queue_.getStats(); }
 
 private:
     Queue queue_;
