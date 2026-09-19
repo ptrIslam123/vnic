@@ -53,29 +53,37 @@ bool Queue::stop() {
 }
 
 void Queue::push(Packet&& packet) {
-    std::size_t segments{0};
-    std::size_t bytes{0};
+    // Packet - это цепочка сегментов (next). Это ЧАСТИ ОДНОГО пакета,
+    // а не отдельные пакеты. Их нельзя передать по частям — иначе
+    // приложение получит только часть данных.
+    //
+    // Поэтому: сначала считаем, сколько нужно дескрипторов,
+    // проверяем, что места хватит на ВСЕ, и только потом перемещаем.
 
-    packet.forEachSegment([&](const Packet& packet) {
+    // Подсчёт сегментов
+    std::size_t segments = 0;
+    std::size_t bytes = 0;
+
+    packet.forEachSegment([&](const Packet& p) {
         ++segments;
-        bytes += packet.length;
+        bytes += p.length;
         return true;
     });
 
+    // Если места меньше, чем сегментов - дропаем весь сетевой пакет
     if (free_.size() < segments) [[unlikely]] {
         // stats_.overflows++;
-        // stats_.droppedPackets++;
+        // stats_.droppedPackets += segments;
         // stats_.droppedBytes += bytes;
         return;
     }
 
-    packet.forEachSegment([&](Packet& packet) {
-        auto&& descr{free_.pop()};
-        descr.setMetadata(packet);
-        std::memcpy(descr.data, packet.data, packet.length);
+    // Перемещение сетевого пакет в очередь
+    packet.forEachSegment([&](Packet& p) {
+        auto descr = free_.pop();
+        descr.setMetadata(p);
+        std::memcpy(descr.data, p.data, p.length);
         used_.push(std::move(descr));
-        // stats_.processedPackets++;
-        //stats_.processedBytes += current->length;
         return true;
     });
 

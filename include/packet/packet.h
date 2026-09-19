@@ -4,7 +4,12 @@
 
 #include <cstdint>
 
+#include <linux/types.h>
+
 namespace vnic {
+
+namespace __impl_details {
+
 
 template<typename Func, typename Packet>
 concept SegmentVisitor = requires(Func func, Packet& p) {
@@ -14,6 +19,17 @@ concept SegmentVisitor = requires(Func func, Packet& p) {
 template<typename Func, typename Packet>
 concept ConstSegmentVisitor = requires(Func func, const Packet& p) {
     { func(p) } -> std::convertible_to<bool>;
+};
+
+} // namespace __impl_details
+
+
+struct FiveTuple {
+    __be32 sadr;
+    __be32 dadr;
+    __be16 sport;
+    __be16 dport;
+    uint8_t iproto;
 };
 
 template<std::size_t N>
@@ -27,11 +43,11 @@ struct FixedPacket {
     std::uint16_t vlanId;       // VLAN-тег
     std::uint32_t length = 0;        // Длина данных в ЭТОМ сегменте
     std::uint32_t totalLength = 0;   // Общая длина всех сегментов
-    FixedPacket* next; // Следующий сегмент (для Jumbo Frames / TSO)
+    FixedPacket* next; // Следующий сегмент, содержащий остальную часть сетевого пакета(для Jumbo Frames / TSO)
     std::uint8_t data[N];
 
     template<typename Func>
-        requires SegmentVisitor<Func, FixedPacket>
+        requires __impl_details::SegmentVisitor<Func, FixedPacket>
     void forEachSegment(Func func) {
         for (FixedPacket* p = this; p != nullptr; p = p->next) {
             if (!func(*p)) {
@@ -41,13 +57,17 @@ struct FixedPacket {
     }
 
     template<typename Func>
-        requires ConstSegmentVisitor<Func, FixedPacket>
+        requires __impl_details::ConstSegmentVisitor<Func, FixedPacket>
     void forEachSegment(Func func) const {
         for (const FixedPacket* p = this; p != nullptr; p = p->next) {
             if (!func(*p)) {
                 break;
             }
         }
+    }
+
+    FiveTuple get5Tuple() {
+        return {};
     }
 };
 

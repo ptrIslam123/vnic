@@ -251,7 +251,7 @@ int main() {
     // ============================================================
     //  8. ОСТАНОВКА
     // ============================================================
-    std::this_thread::sleep_for(std::chrono::seconds{60});
+    //std::this_thread::sleep_for(std::chrono::seconds{60});
     std::cout << "Stopping NIC...\n";
     nic.stop();
 

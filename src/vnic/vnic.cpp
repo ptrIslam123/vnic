@@ -28,11 +28,12 @@ void VNic::distribute(Packet&& packet) {
     assert(!rxQueues_.empty());
     const auto& rssConfig{config_.rss};
     if (!rssConfig.enabled) {
+        assert(rxQueues_.empty());
         rxQueues_[0].push(std::move(packet));
     } else {
         assert(reta_.size() > 0 && "RETA is not initialized!");
         assert((reta_.size() & (reta_.size() - 1)) == 0 && "RETA size must be a power of 2!");
-        const auto hash{rss::soft::calc_hash(packet, rssConfig.key, rssConfig.hf, rssConfig.protocol)};
+        const auto hash{rss::soft::calc_hash(packet.get5Tuple(), rssConfig.key, rssConfig.hf, rssConfig.protocol)};
         const auto queueId{reta_[hash & (reta_.size() - 1)]};
         rxQueues_[queueId].push(std::move(packet));
     }

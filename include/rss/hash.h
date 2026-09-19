@@ -27,7 +27,7 @@ enum class Protocol : std::uint32_t {
 
 namespace soft {
 
-std::uint32_t calc_hash(const vnic::Packet& packet, std::span<const std::uint8_t> key, HashFunc hf, Protocol protocol);
+std::uint32_t calc_hash(const FiveTuple& tuple, std::span<const std::uint8_t> key, HashFunc hf, Protocol protocol);
 
 } // namespace vnic::rss::soft
 
