@@ -1,6 +1,6 @@
 #include "include/rss/hash.h"
 
-#include <rte_ethdev.h>
+//#include <rte_ethdev.h>
 
 #include <cstring>
 #include <cassert>
@@ -78,12 +78,12 @@ std::uint32_t calc_hash(const FiveTuple& tuple, std::span<const std::uint8_t> ke
      }
 
      auto len{ 64 };
-     // Если включена RSS HashFunc для портов, изменим длину последовательности.
-     if( ( !!( hashFuncMask & ETH_RSS_UDP ) && tuple.iproto == IPPROTO_UDP ) ||
-         ( !!( hashFuncMask & ETH_RSS_TCP ) && tuple.iproto == IPPROTO_TCP ) )
-     {
-          len += 32;
-     }
+     // // Если включена RSS HashFunc для портов, изменим длину последовательности.
+     // if( ( !!( hashFuncMask & ETH_RSS_UDP ) && tuple.iproto == IPPROTO_UDP ) ||
+     //     ( !!( hashFuncMask & ETH_RSS_TCP ) && tuple.iproto == IPPROTO_TCP ) )
+     // {
+     //      len += 32;
+     // }
      return key320_hash_calc( reinterpret_cast< const std::uint32_t* >( key.data() ), 0,
                               reinterpret_cast< const std::uint8_t* >( &tuple ), len );
 }
