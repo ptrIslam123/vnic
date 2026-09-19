@@ -1,11 +1,10 @@
 #include "queue/queue.h"
 
-#include <cstring>
 #include <cassert>
 
 namespace vnic {
 
-bool Queue::configure(const Config& config) {
+bool Queue::configureImpl(const Config& config) {
     config_ = config;
 
     const memory::Pool::Config memConfig{
@@ -20,7 +19,7 @@ bool Queue::configure(const Config& config) {
     return true;
 }
 
-bool Queue::start() {
+bool Queue::startImpl() {
     free_.reserve(config_.size);
     used_.reserve(config_.size);
 
@@ -38,7 +37,7 @@ bool Queue::start() {
     return true;
 }
 
-bool Queue::stop() {
+bool Queue::stopImpl() {
     while (!free_.isEmpty()) {
         auto&& desc{free_.pop()};
         memory_.deallocate(desc.data);
@@ -50,44 +49,6 @@ bool Queue::stop() {
     }
 
     return true;
-}
-
-void Queue::push(Packet&& packet) {
-    // Packet - это цепочка сегментов (next). Это ЧАСТИ ОДНОГО пакета,
-    // а не отдельные пакеты. Их нельзя передать по частям — иначе
-    // приложение получит только часть данных.
-    //
-    // Поэтому: сначала считаем, сколько нужно дескрипторов,
-    // проверяем, что места хватит на ВСЕ, и только потом перемещаем.
-
-    // Подсчёт сегментов
-    std::size_t segments = 0;
-    std::size_t bytes = 0;
-
-    packet.forEachSegment([&](const Packet& p) {
-        ++segments;
-        bytes += p.length;
-        return true;
-    });
-
-    // Если места меньше, чем сегментов - дропаем весь сетевой пакет
-    if (free_.size() < segments) [[unlikely]] {
-        // stats_.overflows++;
-        // stats_.droppedPackets += segments;
-        // stats_.droppedBytes += bytes;
-        return;
-    }
-
-    // Перемещение сетевого пакет в очередь
-    packet.forEachSegment([&](Packet& p) {
-        auto descr = free_.pop();
-        descr.setMetadata(p);
-        std::memcpy(descr.data, p.data, p.length);
-        used_.push(std::move(descr));
-        return true;
-    });
-
-    notifyRxListener();
 }
 
 void Queue::notifyRxListener() {

@@ -1,24 +1,27 @@
 #pragma once
 
-#include "queue/queue.h"
+#include "queue/rx_queue.h"
+#include "queue/tx_queue.h"
 #include "packet/packet.h"
 #include "channel/link.h"
 #include "rss/hash.h"
+#include "utils/state_ful.h"
 
 #include <vector>
 #include <cstdint>
 
 namespace vnic {
 
-class VNic final {
+class VNic final : public utils::Stateful<VNic> {
 public:
+    VNic() = default;
+    VNic(const VNic&) = delete;
+    VNic(VNic&&) = delete;
+    VNic& operator=(const VNic&) = delete;
+    VNic& operator=(VNic&&) = delete;
+
     enum class ErrorCode {
 
-    };
-
-    enum class State : uint8_t {
-        Started,
-        Stopped,
     };
 
     struct Config {
@@ -63,15 +66,8 @@ public:
     bool updateReta(Config::Rss::Reta&& reta);
     bool updateReta(const Config::Rss::Reta& reta);
 
-    bool configure(const Config& config);
-    bool configureQueue(std::uint16_t queueId, const RxQueue::Config& config);
-    bool configureQueue(std::uint16_t queueId, const TxQueue::Config& config);
-
     bool upLink();
     bool downLink();
-
-    bool start();
-    bool stop();
 
     void rx(Packet&& packet);
     void resetStats();
@@ -79,13 +75,21 @@ public:
     const RxQueue& getRxQueue(std::uint16_t queueId) const;
     const TxQueue& getTxQueue(std::uint16_t queueId) const;
     const Config& getConfig() const;
-    const Config::Rss::Reta& getReta() const;
     const stats::Stats& getStats() const;
+    const Config::Rss::Reta& getReta() const;
     enum ErrorCode getErrorCode() const;
-    enum State getState() const;
 
 private:
-    bool initReta();
+    friend utils::Stateful<VNic>;
+
+    bool startImpl();
+    bool stopImpl();
+
+    bool configureImpl(const Config& config);
+    bool configureImpl(std::uint16_t queueId, const RxQueue::Config& config);
+    bool configureImpl(std::uint16_t queueId, const TxQueue::Config& config);
+
+    bool initReta(Config::Rss::Reta& reta);
     bool configureRss();
     bool configureQueues();
     bool configureLink();
@@ -110,7 +114,6 @@ private:
     std::vector<RxQueue::Config> rxQueueConfigs_;
     std::vector<TxQueue::Config> txQueueConfigs_;
     Config config_;
-    enum State state_;
     enum ErrorCode eCode_;
 
 

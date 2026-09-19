@@ -16,17 +16,28 @@ namespace vnic {
 template<typename T>
 class Fifo final {
 public:
+
+    Fifo() {}
+    Fifo(const Fifo& ) {}
+    Fifo& operator=(const Fifo& ) { return *this; }
     // --- Запись ---
     template<typename... Args>
     void emplace(Args&&... args);
     void push(const T& value);
     void push(T&& value);
+    // блокируется до тех пор, пока не сможет записать все
     void pushAll(std::span<const T> data);
+
+    // не блокирующая функция, пытается записать сколько сможет, возвращает сколько смог записать
     std::size_t pushSome(std::span<const T> data);
 
     // --- Чтение ---
     T pop();
+    // не блокирующая функция, пытается считать сколько сможет, возвращает сколько смог считать
     std::size_t popSome(std::vector<T>& buffer);
+
+    template<std::size_t N>
+    std::size_t popSome(std::span<T, N> buffer);
 
     // --- Информация ---
     void reserve(std::size_t size);
@@ -101,6 +112,25 @@ T Fifo<T>::pop() {
     T value = std::move(queue_.front());
     queue_.pop();
     return value;
+}
+
+template<typename T>
+template<std::size_t N>
+std::size_t Fifo<T>::popSome(std::span<T, N> buffer) {
+    std::unique_lock lock(mutex_);
+
+    // Ждём, пока появится хотя бы один элемент
+    condVar_.wait(lock, [this] {
+        return !queue_.empty();
+    });
+
+    std::size_t count = 0;
+    while (!queue_.empty() && count < buffer.size()) {
+        buffer[count] = std::move(queue_.front());
+        queue_.pop();
+        ++count;
+    }
+    return count;
 }
 
 template<typename T>

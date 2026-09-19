@@ -1,7 +1,7 @@
 #pragma once
 
 #include "clock/clock.h"
-#include "queue/fifo.h"
+#include "utils/fifo.h"
 
 #include <atomic>
 #include <thread>

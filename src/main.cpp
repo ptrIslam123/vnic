@@ -129,7 +129,7 @@ int main() {
     // rxConfig.offloads.checksumIp = true;
     // rxConfig.offloads.checksumTcp = true;
     // rxConfig.offloads.vlanStrip = true;
-    if (!nic.configureQueue(0, rxConfig)) {
+    if (!nic.configure(0, rxConfig)) {
         std::cerr << "Failed to configure RX queue 0\n";
         return 1;
     }

@@ -16,8 +16,6 @@ namespace vnic::stats {
 // т.к. упорядочивание памяти между потоками не требуется.
 class Stats {
 public:
-    static_assert(std::is_trivially_copyable_v<Stats>);
-
     // --- Чтение (атомарный load) ---
     std::uint64_t loadProcessedPackets() const { return __atomic_load_n(&processedPackets_, __ATOMIC_RELAXED); }
     std::uint64_t loadProcessedBytes() const { return __atomic_load_n(&processedBytes_, __ATOMIC_RELAXED); }
@@ -45,12 +43,12 @@ public:
     }
 
 private:
-    std::uint64_t processedPackets_ = 0;
-    std::uint64_t processedBytes_ = 0;
-    std::uint64_t droppedPackets_ = 0;
-    std::uint64_t droppedBytes_ = 0;
-    std::uint64_t errors_ = 0;
-    std::uint64_t overflows_ = 0;
+    std::uint64_t processedPackets_{0};
+    std::uint64_t processedBytes_{0};
+    std::uint64_t droppedPackets_{0};
+    std::uint64_t droppedBytes_{0};
+    std::uint64_t errors_{0};
+    std::uint64_t overflows_{0};
 };
 
 } // namespace vnic::stats
