@@ -8,23 +8,35 @@ namespace {
 
 namespace vnic {
 
-void VNic::rx(Packet&& packet) {
+void VNic::process(IncomingPacket&& packet) {
     link_.put(std::move(packet));
 }
 
-bool VNic::validate(const Packet& packet) const {
+std::uint64_t VNic::rx(std::vector<PacketDescriptor>& descs) {
+    return 0;
+}
+
+void VNic::freeRx(std::vector<PacketDescriptor>& descs) {
+
+}
+
+std::uint64_t VNic::tx(std::vector<PacketDescriptor>& descs) {
+    // TODO
+}
+
+bool VNic::validate(const IncomingPacket& packet) const {
     return true; //TODO
 }
 
-bool VNic::l2Filter(const Packet& packet) const {
+bool VNic::l2Filter(const IncomingPacket& packet) const {
     return true; //TODO
 }
 
-bool VNic::softOffloads(Packet& packet) {
+bool VNic::softOffloads(IncomingPacket& packet) {
     return true; // TODO
 }
 
-void VNic::distribute(Packet&& packet) {
+void VNic::distribute(IncomingPacket&& packet) {
     assert(!rxQueues_.empty());
     std::uint64_t rxBytes;
     const auto& rssConfig{config_.rss};
@@ -41,7 +53,7 @@ void VNic::distribute(Packet&& packet) {
 
     if (rxBytes > 0) {
         stats_.fetchProcessedPackets();
-        stats_.fetchProcessedBytes();
+        stats_.fetchProcessedBytes(rxBytes);
     } else {
         stats_.fetchDroppedPackets();
         stats_.fetchDroppedBytes(rxBytes);
@@ -80,7 +92,7 @@ bool VNic::initReta(Config::Rss::Reta& reta) {
     constexpr auto RETA_SIZE{512};
     reta.resize(RETA_SIZE);
     for (std::uint16_t i{0}; i < RETA_SIZE; ++i) {
-        reta_[i] = i % config_.rxQueueCount;
+        reta[i] = i % config_.rxQueueCount;
     }
     return true;
 }
@@ -124,7 +136,7 @@ bool VNic::configureRss() {
     }
 
     Config::Rss::Reta reta;
-    if (initReta(reta)) [[unlikely]] {
+    if (!initReta(reta)) [[unlikely]] {
         return false;
     }
     return updateReta(std::move(reta));
@@ -209,7 +221,8 @@ bool VNic::stopQueues() {
 }
 
 bool VNic::stopImpl() {
-    return true;
+    link_.wakeup();
+    return stopQueues();
 }
 
 bool VNic::updateReta(Config::Rss::Reta&& reta) {

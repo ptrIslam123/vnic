@@ -3,7 +3,7 @@
 #include "memory/memory_pool.h"
 #include "utils/fifo.h"
 #include "utils/state_ful.h"
-#include "packet/packet.h"
+#include "packet/packet_descriptor.h"
 #include "stats/stats.h"
 
 namespace vnic {

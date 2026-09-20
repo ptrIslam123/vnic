@@ -1,24 +1,19 @@
 #pragma once
 
-#include "packet/packet.h"
+#include "packet/incoming_packet.h"
 #include "channel/channel.h"
 
 namespace vnic {
 
 struct Sizeof {
-    std::size_t operator() (const Packet& packet) const {
-        std::size_t bytes{0};
-        packet.forEachSegment([&](const Packet& packet) {
-            bytes += packet.length;
-            return true;
-        });
-        return bytes;
+    std::size_t operator() (const IncomingPacket& packet) const {
+        return packet.length;
     }
 };
 
-class Link : public soft::Channel<Packet, Sizeof> {
+class Link : public soft::Channel<IncomingPacket, Sizeof> {
 public:
-    struct Config : soft::Channel<Packet, Sizeof>::Config {};
+    struct Config : soft::Channel<IncomingPacket, Sizeof>::Config {};
 
 private:
 };

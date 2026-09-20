@@ -1,4 +1,5 @@
 #include "include/queue/rx_queue.h"
+#include  "include/constanst.h"
 
 #include <array>
 
@@ -6,7 +7,22 @@
 
 namespace vnic {
 
-std::uint64_t RxQueue::put(Packet&& packet) {
+std::uint64_t RxQueue::put(IncomingPacket&& incomePacket) {
+    const auto bytes{incomePacket.length};
+    const auto segments{static_cast<std::uint64_t>(bytes / Packet::SEGMENT_SIZE)};
+
+    std::array<PacketDescriptor, MAX_SEGMENTS> descs;
+    const auto n{freeDescriptors_.popSome(descs)};
+    if (n < segments) {
+        // drop packet
+    }
+
+    for (decltype(n) i{0}; i < n; ++i) {
+        PacketDescriptor& desc{descs[i]};
+        desc.setMetadata(incomePacket);
+        // recopy data
+    }
+
     // Packet - это цепочка сегментов (next). Это ЧАСТИ ОДНОГО пакета,
     // а не отдельные пакеты. Их нельзя передать по частям — иначе
     // приложение получит только часть данных.

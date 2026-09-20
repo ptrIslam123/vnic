@@ -2,7 +2,7 @@
 
 #include "queue/rx_queue.h"
 #include "queue/tx_queue.h"
-#include "packet/packet.h"
+#include "packet/incoming_packet.h"
 #include "channel/link.h"
 #include "rss/hash.h"
 #include "utils/state_ful.h"
@@ -69,7 +69,10 @@ public:
     bool upLink();
     bool downLink();
 
-    void rx(Packet&& packet);
+    void process(IncomingPacket&& packet);
+    std::uint64_t rx(std::vector<PacketDescriptor>& descs);
+    std::uint64_t tx(std::vector<PacketDescriptor>& descs);
+    void freeRx(std::vector<PacketDescriptor>& descs);
     void resetStats();
 
     const RxQueue& getRxQueue(std::uint16_t queueId) const;
@@ -94,11 +97,11 @@ private:
     bool configureQueues();
     bool configureLink();
 
-    bool validate(const Packet& packet) const;
-    bool l2Filter(const Packet& packet) const;
-    bool softOffloads(Packet& packet);
+    bool validate(const IncomingPacket& packet) const;
+    bool l2Filter(const IncomingPacket& packet) const;
+    bool softOffloads(IncomingPacket& packet);
 
-    void distribute(Packet&& packet);
+    void distribute(IncomingPacket&& packet);
 
     bool startQueues();
     bool stopQueues();
