@@ -1,13 +1,4 @@
 #include "vnic/vnic.h"
-#include "packet/packet.h"
-
-#include <thread>
-#include <array>
-
-#include <cstring>
-
-#include "vnic/vnic.h"
-#include "packet/packet.h"
 
 #include <array>
 #include <vector>
@@ -16,7 +7,6 @@
 #include <cstring>
 #include <iostream>
 #include <iomanip>
-#include <atomic>
 
 // ============================================================
 //  ГЕНЕРАЦИЯ ТЕСТОВЫХ ПАКЕТОВ
@@ -87,6 +77,14 @@ static TcpPacket makePacket(std::uint32_t srcIp, std::uint32_t dstIp,
     return pkt;
 }
 
+constexpr std::size_t NUM_PACKETS = 10000;
+constexpr std::size_t NUM_FLOWS = 100;
+
+// Буферы под пакеты, уходящие на "линк": NIC копирует данные в свой
+// memory pool асинхронно (патрульный поток), поэтому нельзя использовать
+// стековые локальные переменные — они умирают при выходе из итерации.
+static std::uint8_t rawBuffers[NUM_PACKETS * sizeof(TcpPacket)];
+
 // ============================================================
 //  MAIN
 // ============================================================
@@ -121,17 +119,28 @@ int main() {
         return 1;
     }
 
-    // --- RX очередь 0 ---
-    vnic::RxQueue::Config rxConfig;
-    rxConfig.queueId = 0;
-    rxConfig.size = 512;              // ← 512 дескрипторов
-    rxConfig.socketId = 0;            // ← NUMA-узел 0
-    // rxConfig.offloads.checksumIp = true;
-    // rxConfig.offloads.checksumTcp = true;
-    // rxConfig.offloads.vlanStrip = true;
-    if (!nic.configure(0, rxConfig)) {
-        std::cerr << "Failed to configure RX queue 0\n";
-        return 1;
+    // Все RX-очереди (без configure() очередь нельзя стартовать)
+    for (std::uint16_t q = 0; q < config.rxQueueCount; ++q) {
+        vnic::RxQueue::Config rxConfig;
+        rxConfig.queueId = q;
+        rxConfig.size = 512;              // 512 дескрипторов
+        rxConfig.socketId = 0;            // NUMA-узел 0
+        if (!nic.configure(q, rxConfig)) {
+            std::cerr << "Failed to configure RX queue " << q << "\n";
+            return 1;
+        }
+    }
+
+    // Все TX-очереди (в v1 TX-дескрипторов не выделяем)
+    for (std::uint16_t q = 0; q < config.txQueueCount; ++q) {
+        vnic::TxQueue::Config txConfig;
+        txConfig.queueId = q;
+        txConfig.size = 0;
+        txConfig.socketId = 0;
+        if (!nic.configure(q, txConfig)) {
+            std::cerr << "Failed to configure TX queue " << q << "\n";
+            return 1;
+        }
     }
 
     if (!nic.upLink()) {
@@ -149,21 +158,17 @@ int main() {
     // ============================================================
     //  2. ЗАПУСК NIC
     // ============================================================
-    std::atomic<bool> running{true};
 
     std::thread rxThread{[&] {
-        nic.start();  // ← блокирующий цикл
+        nic.start();  // блокирующий цикл RX-патруля; завершится по nic.stop()
     }};
 
-    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    std::this_thread::sleep_for(std::chrono::milliseconds{60});
 
     // ============================================================
     //  3. ОТПРАВКА ПАКЕТОВ
     // ============================================================
     std::cout << "Sending packets...\n";
-
-    constexpr std::size_t NUM_PACKETS = 10000;
-    constexpr std::size_t NUM_FLOWS = 100;
 
     auto startTime = std::chrono::steady_clock::now();
 
@@ -177,18 +182,20 @@ int main() {
         auto raw = makePacket(srcIp, dstIp, srcPort, dstPort,
                               static_cast<std::uint8_t>(i & 0xFF));
 
-        // Создать пакет
-        vnic::Packet packet;
-        packet.length = sizeof(TcpPacket);
-        packet.totalLength = sizeof(TcpPacket);
-        packet.timestamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        packet.hash = srcIp ^ (srcPort << 16);
-        packet.offloads = 0;
-        packet.next = nullptr;
-        std::memcpy(packet.data, &raw, sizeof(TcpPacket));
+        // Копируем в собственный слот (см. rawBuffers выше)
+        auto* rawPtr = rawBuffers + i * sizeof(TcpPacket);
+        std::memcpy(rawPtr, &raw, sizeof(TcpPacket));
 
-        // Отправить в NIC
-        nic.rx(std::move(packet));
+        // Пакет на линии: NIC не владеет data_, а копирует его в свой пул
+        vnic::IncomingPacket packet;
+        packet.data     = rawPtr;
+        packet.length   = sizeof(TcpPacket);
+        packet.hash     = srcIp ^ (srcPort << 16);
+        packet.queueId  = 0;
+        packet.offloads = 0;
+
+        // Отправить в NIC (RX-вход линка)
+        nic.process(std::move(packet));
     }
 
     auto endTime = std::chrono::steady_clock::now();
@@ -198,7 +205,7 @@ int main() {
     std::cout << "Sent " << NUM_PACKETS << " packets in "
               << elapsed << " us\n";
     std::cout << "Rate: " << (NUM_PACKETS * 1'000'000.0 / elapsed)
-              << " packets/sec\n\n";
+              << " packets/sec\n";
 
     // ============================================================
     //  4. ОЖИДАНИЕ ОБРАБОТКИ
@@ -206,34 +213,51 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds{500});
 
     // ============================================================
-    //  5. СТАТИСТИКА
+    //  5. ПРИЛОЖЕНИЕ ЗАБИРАЕТ ПАКЕТЫ ИЗ RX-ОЧЕРЕДЕЙ (v1 API)
+    // ============================================================
+    std::vector<vnic::PacketDescriptor> rxDescs;
+    std::uint64_t received = 0;
+    for (int round = 0; round < 16; ++round) {
+        rxDescs.clear();
+        const auto n = nic.rx(rxDescs);
+        if (n == 0) {
+            break;
+        }
+        received += n;
+        nic.freeRx(rxDescs);
+    }
+
+    std::cout << "App received " << received << " packets from RX queues\n";
+    std::cout << "Buffer capacity: " << config.rxQueueCount * 512
+              << " descriptors (остальные дропнуты по переполнению)\n\n";
+
+    // ============================================================
+    //  6. СТАТИСТИКА
     // ============================================================
     auto stats = nic.getStats();
 
     std::cout << "=== Statistics ===\n";
-    // std::cout << "  RX packets:  " << stats.rxPackets << "\n";
-    // std::cout << "  RX bytes:    " << stats.rxBytes << "\n";
-    // std::cout << "  RX dropped:  " << stats.rxDropped << "\n";
-    // std::cout << "  RX errors:   " << stats.rxErrors << "\n";
-    // std::cout << "  TX packets:  " << stats.txPackets << "\n";
-    // std::cout << "  TX bytes:    " << stats.txBytes << "\n";
-    // std::cout << "  Overflows:   " << stats.overflows << "\n\n";
+    std::cout << "  RX processed: " << stats.loadProcessedPackets()
+              << " packets, " << stats.loadProcessedBytes() << " bytes\n";
+    std::cout << "  RX dropped:   " << stats.loadDroppedPackets()
+              << " packets, " << stats.loadDroppedBytes() << " bytes\n";
+    std::cout << "  Overflows:    " << stats.loadOverflows() << "\n\n";
 
     // ============================================================
-    //  6. СТАТИСТИКА ПО ОЧЕРЕДЯМ
+    //  7. СТАТИСТИКА ПО ОЧЕРЕДЯМ
     // ============================================================
     std::cout << "=== Per-Queue Statistics ===\n";
-    for (std::size_t q = 0; q < config.rxQueueCount; ++q) {
-        const auto& rxQueue = nic.getRxQueue(q);
-        auto qStats = rxQueue.getStats();
-        // std::cout << "  RX Queue " << q << ": "
-        //           << qStats.processedPackets << " packets, "
-        //           << qStats.processedBytes << " bytes\n";
+    for (std::uint16_t q = 0; q < config.rxQueueCount; ++q) {
+        const auto qStats = nic.getRxQueue(q).getStats();
+        std::cout << "  RX Queue " << q << ": "
+                  << qStats.loadProcessedPackets() << " packets, "
+                  << qStats.loadProcessedBytes() << " bytes, "
+                  << qStats.loadOverflows() << " overflows\n";
     }
     std::cout << "\n";
 
     // ============================================================
-    //  7. ПРОВЕРКА RETA
+    //  8. ПРОВЕРКА RETA
     // ============================================================
     std::cout << "=== RETA Distribution ===\n";
     const auto& reta = nic.getReta();
@@ -244,16 +268,16 @@ int main() {
     for (std::size_t q = 0; q < 4; ++q) {
         std::cout << "  Queue " << q << ": "
                   << retaCounts[q] << " / " << reta.size()
-                  << " (" << (retaCounts[q] * 100.0 / reta.size()) << "%)\n";
+                  << " (" << std::fixed << std::setprecision(1)
+                  << (retaCounts[q] * 100.0 / reta.size()) << "%)\n";
     }
     std::cout << "\n";
 
     // ============================================================
-    //  8. ОСТАНОВКА
+    //  9. ОСТАНОВКА
     // ============================================================
-    //std::this_thread::sleep_for(std::chrono::seconds{60});
     std::cout << "Stopping NIC...\n";
-    nic.stop();
+    nic.stop();  // корректно выходит из блокирующего цикла RX-патруля
 
     if (rxThread.joinable()) {
         rxThread.join();

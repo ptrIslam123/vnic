@@ -110,6 +110,12 @@ public:
         return fifo_.popSome(buffer);
     }
 
+    // Разблокирует get(), если читатель спит в ожидании пакета
+    // (используется для корректного выхода из RX-патруля при stop)
+    void wakeup() noexcept {
+        fifo_.wake();
+    }
+
 private:
     std::uint64_t speedBytesPerSecond_ = 0;
     std::uint64_t lastWriteTime_ = 0;

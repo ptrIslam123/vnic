@@ -34,7 +34,7 @@ public:
         const auto raw = __atomic_load_n(
             &state_,
             std_memory_order_to_int(memoryOrder)
-            );
+        );
         return static_cast<State>(raw);
     }
 
@@ -60,12 +60,17 @@ public:
             return false;
         }
 
+        // ВАЖНО: состояние Started выставляем ДО вызова startImpl(), а не после.
+        // startImpl() у VNic — это блокирующий цикл RX-патруля: он крутится, пока
+        // состояние == Started, а stop() переводит Started -> Stopping. Если бы
+        // Started выставлялся ПОСЛЕ возврата из startImpl(), патруль бы никогда
+        // не вошёл в цикл, а stop() не смог бы аккуратно его завершить.
+        setState(State::Started);
         if (!self().startImpl(std::forward<Args>(args)...)) [[unlikely]] {
             setState(State::Error);
             return false;
         }
 
-        setState(State::Started);
         return true;
     }
 

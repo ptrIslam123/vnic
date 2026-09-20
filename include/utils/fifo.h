@@ -33,11 +33,22 @@ public:
 
     // --- Чтение ---
     T pop();
-    // не блокирующая функция, пытается считать сколько сможет, возвращает сколько смог считать
+    // блокируется до тех пор, пока не появится хотя бы один элемент,
+    // затем пытается считать сколько сможет, возвращает сколько смог считать
     std::size_t popSome(std::vector<T>& buffer);
 
     template<std::size_t N>
     std::size_t popSome(std::span<T, N> buffer);
+
+    // не блокирующая функция, считывает сколько есть, возвращает сколько смог считать
+    template<std::size_t N>
+    std::size_t tryPopSome(std::span<T, N> buffer);
+
+    // --- Управление ---
+    // Разблокирует читателей, ожидающих в popSome (используется для выхода
+    // из блокирующего RX-патруля при stop). После wake() новые popSome
+    // больше НЕ блокируются, пока очередь не опустеет и снова не появится элемент.
+    void wake() noexcept;
 
     // --- Информация ---
     void reserve(std::size_t size);
@@ -48,6 +59,7 @@ private:
     std::condition_variable condVar_;
     mutable std::mutex mutex_;
     std::queue<T> queue_;
+    bool wake_{false};
 };
 
 template<typename T>
@@ -119,9 +131,9 @@ template<std::size_t N>
 std::size_t Fifo<T>::popSome(std::span<T, N> buffer) {
     std::unique_lock lock(mutex_);
 
-    // Ждём, пока появится хотя бы один элемент
+    // Ждём, пока появится хотя бы один элемент (или не придёт wake())
     condVar_.wait(lock, [this] {
-        return !queue_.empty();
+        return wake_ || !queue_.empty();
     });
 
     std::size_t count = 0;
@@ -137,7 +149,7 @@ template<typename T>
 std::size_t Fifo<T>::popSome(std::vector<T>& buffer) {
     std::unique_lock lock(mutex_);
     condVar_.wait(lock, [this]{
-        return !queue_.empty();
+        return wake_ || !queue_.empty();
     });
 
     std::size_t count = 0;
@@ -147,6 +159,32 @@ std::size_t Fifo<T>::popSome(std::vector<T>& buffer) {
         ++count;
     }
     return count;
+}
+
+template<typename T>
+template<std::size_t N>
+std::size_t Fifo<T>::tryPopSome(std::span<T, N> buffer) {
+    std::lock_guard lock(mutex_);
+    if (queue_.empty()) {
+        return 0;
+    }
+
+    std::size_t count = 0;
+    while (!queue_.empty() && count < buffer.size()) {
+        buffer[count] = std::move(queue_.front());
+        queue_.pop();
+        ++count;
+    }
+    return count;
+}
+
+template<typename T>
+void Fifo<T>::wake() noexcept {
+    {
+        std::lock_guard lock(mutex_);
+        wake_ = true;
+    }
+    condVar_.notify_all();
 }
 
 template<typename T>

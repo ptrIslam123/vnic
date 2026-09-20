@@ -13,15 +13,49 @@ void VNic::process(IncomingPacket&& packet) {
 }
 
 std::uint64_t VNic::rx(std::vector<PacketDescriptor>& descs) {
-    return 0;
+    std::uint64_t received{0};
+    for (auto& queue : rxQueues_) {
+        received += queue.take(descs);
+    }
+    return received;
 }
 
 void VNic::freeRx(std::vector<PacketDescriptor>& descs) {
+    // Каждый дескриптор возвращаем в пул той очереди, которая его накопила
+    // (buffer принадлежит его memory pool). queueId записываем при приёме.
+    for (auto& desc : descs) {
+        const auto queueId = desc.metadata.queueId;
+        if (queueId >= rxQueues_.size()) [[unlikely]] {
+            continue;
+        }
 
+        std::vector<PacketDescriptor> chunk;
+        chunk.push_back(std::move(desc));
+        rxQueues_[queueId].free(std::move(chunk));
+    }
+    descs.clear();
 }
 
 std::uint64_t VNic::tx(std::vector<PacketDescriptor>& descs) {
-    // TODO
+    // v1: loopback — дескрипторы TX уходят обратно на линк и проходят
+    // полный RX-путь. Много-сегментные пакеты (next) — вне v1.
+    std::uint64_t sent{0};
+    for (auto& desc : descs) {
+        if (desc.buffer.length == 0 || desc.buffer.memory == nullptr) [[unlikely]] {
+            continue;
+        }
+
+        IncomingPacket packet;
+        packet.data     = desc.buffer.memory;
+        packet.length   = desc.buffer.length;
+        packet.hash     = desc.metadata.hash;
+        packet.queueId  = desc.metadata.queueId;
+        packet.offloads = desc.metadata.offloads;
+
+        process(std::move(packet));
+        ++sent;
+    }
+    return sent;
 }
 
 bool VNic::validate(const IncomingPacket& packet) const {
@@ -38,25 +72,25 @@ bool VNic::softOffloads(IncomingPacket& packet) {
 
 void VNic::distribute(IncomingPacket&& packet) {
     assert(!rxQueues_.empty());
-    std::uint64_t rxBytes;
     const auto& rssConfig{config_.rss};
-    if (!rssConfig.enabled) {
-        assert(rxQueues_.empty());
-        rxBytes = rxQueues_[0].put(std::move(packet));
-    } else {
-        assert(reta_.size() > 0 && "RETA is not initialized!");
+
+    if (rssConfig.enabled) {
+        assert(!reta_.empty() && "RETA is not initialized!");
         assert((reta_.size() & (reta_.size() - 1)) == 0 && "RETA size must be a power of 2!");
         const auto hash{rss::soft::calc_hash(packet.get5Tuple(), rssConfig.key, rssConfig.hf, rssConfig.protocol)};
-        const auto queueId{reta_[hash & (reta_.size() - 1)]};
-        rxBytes = rxQueues_[queueId].put(std::move(packet));
+        packet.queueId = reta_[hash & (reta_.size() - 1)];
+    } else {
+        packet.queueId = 0;
     }
 
-    if (rxBytes > 0) {
+    const auto bytes{packet.length};
+    assert(packet.queueId < rxQueues_.size());
+    if (rxQueues_[packet.queueId].put(std::move(packet))) {
         stats_.fetchProcessedPackets();
-        stats_.fetchProcessedBytes(rxBytes);
+        stats_.fetchProcessedBytes(bytes);
     } else {
         stats_.fetchDroppedPackets();
-        stats_.fetchDroppedBytes(rxBytes);
+        stats_.fetchDroppedBytes(bytes);
     }
 }
 
@@ -165,13 +199,15 @@ bool VNic::startImpl() {
         return false;
     }
 
-    std::vector<Packet> packets;
+    std::vector<IncomingPacket> packets;
     packets.reserve(64);
 
     while (getState() == State::Started) {
         packets.clear();
-        (void)link_.get(packets); // blocking call
-        assert(!packets.empty());
+        (void)link_.get(packets); // blocking call; разблокируется wakeup() при stop()
+        if (packets.empty()) {
+            continue;  // вышли по wakeup(), но без пакета — перепроверяем состояние
+        }
 
         for (auto& packet : packets) {
             if (!validate(packet)) [[unlikely]] {
