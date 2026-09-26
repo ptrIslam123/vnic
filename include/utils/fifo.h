@@ -22,9 +22,9 @@ public:
     Fifo& operator=(const Fifo& ) { return *this; }
     // --- Запись ---
     template<typename... Args>
-    void emplace(Args&&... args);
-    void push(const T& value);
-    void push(T&& value);
+    bool emplace(Args&&... args);
+    bool push(const T& value);
+    bool push(T&& value);
     // блокируется до тех пор, пока не сможет записать все
     void pushAll(std::span<const T> data);
 
@@ -32,13 +32,22 @@ public:
     std::size_t pushSome(std::span<const T> data);
 
     // --- Чтение ---
+    // бросает исключение если пустое
     T pop();
+
     // блокируется до тех пор, пока не появится хотя бы один элемент,
     // затем пытается считать сколько сможет, возвращает сколько смог считать
     std::size_t popSome(std::vector<T>& buffer);
 
+    // блокируется до тех пор, пока не появится хотя бы один элемент, но время ожидания ограничена timeout
+    // затем пытается считать сколько сможет, возвращает сколько смог считать
+    std::size_t popSome(std::vector<T>& buffer, std::chrono::milliseconds timeout);
+
     template<std::size_t N>
     std::size_t popSome(std::span<T, N> buffer);
+
+    template<std::size_t N>
+    std::size_t popSome(std::span<T, N> buffer, std::chrono::milliseconds timeout);
 
     // не блокирующая функция, считывает сколько есть, возвращает сколько смог считать
     template<std::size_t N>
@@ -124,6 +133,12 @@ T Fifo<T>::pop() {
     T value = std::move(queue_.front());
     queue_.pop();
     return value;
+}
+
+template<typename T>
+template<std::size_t N>
+std::size_t Fifo<T>::popSome(std::span<T, N> buffer, std::chrono::milliseconds timeout) {
+    return 0;
 }
 
 template<typename T>

@@ -30,8 +30,10 @@ bool Queue::startImpl() {
         }
 
         PacketDescriptor desc;
-        desc.buffer.memory = static_cast<std::uint8_t*>(buffer);
-        free_.push(std::move(desc));
+        if (!free_.push(std::move(desc))) [[unlikely]] {
+            // TODO: очислить аллоцированное
+            return false;
+        }
     }
 
     return true;
@@ -39,20 +41,14 @@ bool Queue::startImpl() {
 
 bool Queue::stopImpl() {
     while (!free_.isEmpty()) {
-        auto&& desc{free_.pop()};
-        memory_.deallocate(desc.buffer.memory);
+        (void)free_.pop();
     }
 
     while (!used_.isEmpty()) {
-        auto&& desc{used_.pop()};
-        memory_.deallocate(desc.buffer.memory);
+        (void)used_.pop();
     }
 
     return true;
-}
-
-void Queue::notifyRxListener() {
-    // TODO
 }
 
 const Queue::Config& Queue::getConfig() const { return config_; }

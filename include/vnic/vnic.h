@@ -2,12 +2,14 @@
 
 #include "queue/rx_queue.h"
 #include "queue/tx_queue.h"
-#include "packet/incoming_packet.h"
-#include "channel/link.h"
+#include "link/link.h"
 #include "rss/hash.h"
 #include "utils/state_ful.h"
 
 #include <vector>
+#include <span>
+#include <thread>
+
 #include <cstdint>
 
 namespace vnic {
@@ -21,7 +23,7 @@ public:
     VNic& operator=(VNic&&) = delete;
 
     enum class ErrorCode {
-
+        // TODO
     };
 
     struct Config {
@@ -66,15 +68,13 @@ public:
     bool updateReta(Config::Rss::Reta&& reta);
     bool updateReta(const Config::Rss::Reta& reta);
 
-    bool upLink();
-    bool downLink();
+    std::int64_t rx(std::uint16_t queueId, std::vector<PacketDescriptor>& descs);
+    bool freeRx(std::uint16_t queueId, std::vector<PacketDescriptor>&& descs);
 
-    void process(IncomingPacket&& packet);
-    std::uint64_t rx(std::vector<PacketDescriptor>& descs);
-    std::uint64_t tx(std::vector<PacketDescriptor>& descs);
-    void freeRx(std::vector<PacketDescriptor>& descs);
     void resetStats();
 
+    Link& getLink();
+    const Link& getLink() const;
     const RxQueue& getRxQueue(std::uint16_t queueId) const;
     const TxQueue& getTxQueue(std::uint16_t queueId) const;
     const Config& getConfig() const;
@@ -97,11 +97,12 @@ private:
     bool configureQueues();
     bool configureLink();
 
-    bool validate(const IncomingPacket& packet) const;
-    bool l2Filter(const IncomingPacket& packet) const;
-    bool softOffloads(IncomingPacket& packet);
+    bool validate(const PacketDescriptor& packet) const;
+    bool l2Filter(const PacketDescriptor& packet) const;
+    bool softOffloads(PacketDescriptor& packet);
 
-    void distribute(IncomingPacket&& packet);
+    void distribute(PacketDescriptor&& packet, std::span<const std::byte> payload);
+    void poll(std::stop_token stopToken);
 
     bool startQueues();
     bool stopQueues();
@@ -125,6 +126,8 @@ private:
     // Registers for control
     // Mac address
     // Statistics
+
+    std::jthread thread_;
 };
 
 } // namespace vnic
