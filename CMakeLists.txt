@@ -15,6 +15,11 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+find_package(PkgConfig REQUIRED)
+
+pkg_check_modules(LIBNL REQUIRED libnl-3.0 libnl-route-3.0)
+
+
 function(make_example target_name src)
     add_executable(${target_name} ${src})
     target_link_libraries(${target_name} PUBLIC ${PROJECT_NAME})
@@ -41,7 +46,13 @@ file(GLOB_RECURSE VNIC_HDRS "include/*.h")
 file(GLOB_RECURSE VNIC_UNIT_TEST_SRC "tests/unit/*.cpp")
 add_library(${PROJECT_NAME} ${VNIC_SRC} ${VNIC_HDRS})
 
-target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR} "${CMAKE_SOURCE_DIR}/include")
+target_include_directories(${PROJECT_NAME} PUBLIC
+${CMAKE_SOURCE_DIR}
+"${CMAKE_SOURCE_DIR}/include"
+${LIBNL_INCLUDE_DIRS}
+)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE ${LIBNL_LIBRARIES})
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/vnic"

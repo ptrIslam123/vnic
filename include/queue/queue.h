@@ -26,8 +26,6 @@ protected:
     bool startImpl();
     bool stopImpl();
 
-    void notifyRxListener();
-
     Fifo<PacketDescriptor> free_;
     Fifo<PacketDescriptor> used_;
     stats::Stats stats_;

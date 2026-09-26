@@ -1,5 +1,7 @@
 #pragma once
 
+#include "packet/packet_descriptor.h"
+
 #include <cstdint>
 
 #include <linux/types.h>
@@ -15,5 +17,7 @@ struct FiveTuple {
     __be16 dport;
     std::uint8_t iproto;
 };
+
+FiveTuple Get5Tuple(const PacketDescriptor& packet);
 
 } // namespace vnic

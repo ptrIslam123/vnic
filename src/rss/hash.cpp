@@ -1,4 +1,4 @@
-#include "include/rss/hash.h"
+#include "rss/hash.h"
 
 //#include <rte_ethdev.h>
 

@@ -8,134 +8,161 @@
 #include <iostream>
 #include <iomanip>
 
-// ============================================================
-//  ГЕНЕРАЦИЯ ТЕСТОВЫХ ПАКЕТОВ
-// ============================================================
+#include <string>
+#include <vector>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <stdexcept>
+#include <arpa/inet.h>
 
-// Ethernet + IPv4 + TCP заголовок (упрощённый)
-struct TcpPacket {
-    // Ethernet
-    std::uint8_t  dstMac[6];
-    std::uint8_t  srcMac[6];
-    std::uint16_t etherType;      // 0x0800 = IPv4
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/udp.h>
 
-    // IPv4
-    std::uint8_t  versionIhl;     // 0x45
-    std::uint8_t  tos;
-    std::uint16_t totalLength;
-    std::uint16_t identification;
-    std::uint16_t flagsFragment;
-    std::uint8_t  ttl;
-    std::uint8_t  protocol;       // 6 = TCP
-    std::uint16_t headerChecksum;
-    std::uint32_t srcIp;
-    std::uint32_t dstIp;
+static std::array<std::uint8_t, 6> parseMac(const std::string& mac) {
+    std::array<std::uint8_t, 6> result{};
+    unsigned int bytes[6];
 
-    // TCP
-    std::uint16_t srcPort;
-    std::uint16_t dstPort;
-    std::uint32_t seqNum;
-    std::uint32_t ackNum;
-    std::uint8_t  dataOffset;
-    std::uint8_t  flags;
-    std::uint16_t window;
-    std::uint16_t checksum;
-    std::uint16_t urgentPointer;
+    if (std::sscanf(mac.c_str(), "%x:%x:%x:%x:%x:%x",
+                    &bytes[0], &bytes[1], &bytes[2],
+                    &bytes[3], &bytes[4], &bytes[5]) != 6) {
+        throw std::invalid_argument("Invalid MAC: " + mac);
+    }
 
-    // Payload
-    std::uint8_t payload[16];
-} __attribute__((packed));
-
-static TcpPacket makePacket(std::uint32_t srcIp, std::uint32_t dstIp,
-                            std::uint16_t srcPort, std::uint16_t dstPort,
-                            std::uint8_t fillByte)
-{
-    TcpPacket pkt{};
-
-    // Ethernet
-    std::memset(pkt.dstMac, 0xAA, 6);
-    std::memset(pkt.srcMac, 0xBB, 6);
-    pkt.etherType = 0x0008;  // little-endian 0x0800
-
-    // IPv4
-    pkt.versionIhl = 0x45;
-    pkt.totalLength = 0x2800;  // little-endian 40
-    pkt.ttl = 64;
-    pkt.protocol = 6;  // TCP
-    pkt.srcIp = srcIp;
-    pkt.dstIp = dstIp;
-
-    // TCP
-    pkt.srcPort = srcPort;
-    pkt.dstPort = dstPort;
-    pkt.dataOffset = 0x50;  // 5 * 4 = 20 байт
-    pkt.flags = 0x02;       // SYN
-
-    // Payload
-    std::memset(pkt.payload, fillByte, sizeof(pkt.payload));
-
-    return pkt;
+    for (std::size_t i = 0; i < 6; ++i) {
+        result[i] = static_cast<std::uint8_t>(bytes[i]);
+    }
+    return result;
 }
 
-constexpr std::size_t NUM_PACKETS = 10000;
-constexpr std::size_t NUM_FLOWS = 100;
+static std::uint32_t parseIp(const std::string& ip) {
+    struct in_addr addr{};
+    if (::inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
+        throw std::invalid_argument("Invalid IP: " + ip);
+    }
+    return addr.s_addr;  // уже в сетевом порядке
+}
 
-// Буферы под пакеты, уходящие на "линк": NIC копирует данные в свой
-// memory pool асинхронно (патрульный поток), поэтому нельзя использовать
-// стековые локальные переменные — они умирают при выходе из итерации.
-static std::uint8_t rawBuffers[NUM_PACKETS * sizeof(TcpPacket)];
 
-// ============================================================
-//  MAIN
-// ============================================================
+static std::uint16_t computeIpChecksum(const iphdr& ip) {
+    const auto* data = reinterpret_cast<const std::uint16_t*>(&ip);
+    std::uint32_t sum = 0;
+
+    for (std::size_t i = 0; i < sizeof(ip) / 2; ++i) {
+        sum += ntohs(data[i]);
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return htons(static_cast<std::uint16_t>(~sum));
+}
+
+void MakeRawUdpPacket(
+    const std::string& srcMac,
+    const std::string& dstMac,
+    const std::string& srcIp,
+    const std::string& dstIp,
+    std::uint16_t srcPort,
+    std::uint16_t dstPort,
+    std::vector<std::byte>& buffer
+) {
+    const auto srcMacBytes = parseMac(srcMac);
+    const auto dstMacBytes = parseMac(dstMac);
+    const auto srcIpAddr   = parseIp(srcIp);
+    const auto dstIpAddr   = parseIp(dstIp);
+
+    constexpr std::size_t ETH_SIZE = sizeof(ethhdr);
+    constexpr std::size_t IP_SIZE  = sizeof(iphdr);
+    constexpr std::size_t UDP_SIZE = sizeof(udphdr);
+    constexpr std::size_t HEADER_SIZE = ETH_SIZE + IP_SIZE + UDP_SIZE;
+
+    buffer.resize(HEADER_SIZE);
+    std::memset(buffer.data(), 0, HEADER_SIZE);
+
+    auto* ptr = buffer.data();
+
+    // ============================================================
+    //  ETHERNET
+    // ============================================================
+    auto* eth = reinterpret_cast<ethhdr*>(ptr);
+    std::memcpy(eth->h_dest, dstMacBytes.data(), 6);
+    std::memcpy(eth->h_source, srcMacBytes.data(), 6);
+    eth->h_proto = htons(0x0800);  // IPv4
+
+    // ============================================================
+    //  IPv4
+    // ============================================================
+    auto* ip = reinterpret_cast<iphdr*>(ptr + ETH_SIZE);
+    ip->version = 0x45;  // IPv4, IHL = 5 (20 байт)
+    ip->tos = 0;
+    ip->tot_len = htons(static_cast<std::uint16_t>(IP_SIZE + UDP_SIZE));
+    ip->id = 0;
+    ip->frag_off  = 0;
+    ip->ttl            = 64;
+    ip->protocol       = 17;    // UDP
+    ip->check = 0;     // сначала 0, потом посчитаем
+    ip->saddr          = srcIpAddr;
+    ip->daddr          = dstIpAddr;
+
+    // Контрольная сумма IP
+    ip->check = computeIpChecksum(*ip);
+
+    // ============================================================
+    //  UDP
+    // ============================================================
+    auto* udp = reinterpret_cast<udphdr*>(ptr + ETH_SIZE + IP_SIZE);
+    udp->source  = htons(srcPort);
+    udp->dest  = htons(dstPort);
+    udp->len   = htons(static_cast<std::uint16_t>(UDP_SIZE));
+    udp->check = 0;  // 0 = checksum отключена (разрешено для IPv4)
+}
 
 int main() {
-    std::cout << "=== VNic Test ===\n\n";
+    std::cout << "=== VNic Test (UDP) ===\n\n";
 
     vnic::VNic nic;
 
-    // ============================================================
-    //  1. КОНФИГУРАЦИЯ NIC
-    // ============================================================
+    //  КОНФИГУРАЦИЯ NIC
     vnic::VNic::Config config;
-    config.rxQueueCount = 4;
-    config.txQueueCount = 4;
-    config.mtu = 1500;
+    config.rxQueueCount       = 4;
+    config.txQueueCount       = 4;
+    config.mtu                = 1500;
     config.promiscuousEnabled = true;
 
-    // Link (физическое соединение) ---
-    config.link.duplex = vnic::Link::Config::Duplex::Full;
+    // --- Link (физическое соединение) ---
+    config.link.duplex          = vnic::Link::Config::Duplex::Full;
     config.link.autoNegotiation = true;
-    config.link.speedMbps = 10000;  // 10 Гбит/с
+    config.link.speedMbps       = 10000;  // 10 Гбит/с
 
-    // RSS
-    config.rss.enabled = true;
-    config.rss.hf = vnic::rss::HashFunc::TOEPLITZ;
+    // --- RSS ---
+    config.rss.enabled  = true;
+    config.rss.hf       = vnic::rss::HashFunc::TOEPLITZ;
     config.rss.protocol = vnic::rss::Protocol::ALL;
-    config.rss.key = std::vector<std::uint8_t>(40, 0x6D);  // 40 байт ключа
+    config.rss.key      = std::vector<std::uint8_t>(40, 0x6D);
 
     if (!nic.configure(config)) {
         std::cerr << "Failed to configure NIC\n";
         return 1;
     }
 
-    // Все RX-очереди (без configure() очередь нельзя стартовать)
+    // --- RX-очереди ---
     for (std::uint16_t q = 0; q < config.rxQueueCount; ++q) {
         vnic::RxQueue::Config rxConfig;
-        rxConfig.queueId = q;
-        rxConfig.size = 512;              // 512 дескрипторов
-        rxConfig.socketId = 0;            // NUMA-узел 0
+        rxConfig.queueId  = q;
+        rxConfig.size     = 512;  // 512 дескрипторов
+        rxConfig.socketId = 0;
         if (!nic.configure(q, rxConfig)) {
             std::cerr << "Failed to configure RX queue " << q << "\n";
             return 1;
         }
     }
 
-    // Все TX-очереди (в v1 TX-дескрипторов не выделяем)
+    // --- TX-очереди ---
     for (std::uint16_t q = 0; q < config.txQueueCount; ++q) {
         vnic::TxQueue::Config txConfig;
-        txConfig.queueId = q;
-        txConfig.size = 0;
+        txConfig.queueId  = q;
+        txConfig.size     = 0;
         txConfig.socketId = 0;
         if (!nic.configure(q, txConfig)) {
             std::cerr << "Failed to configure TX queue " << q << "\n";
@@ -143,7 +170,7 @@ int main() {
         }
     }
 
-    if (!nic.upLink()) {
+    if (!nic.getLink().up()) {
         std::cerr << "Failed to up link NIC\n";
         return 1;
     }
@@ -151,61 +178,34 @@ int main() {
     std::cout << "NIC configured:\n";
     std::cout << "  RX queues: " << config.rxQueueCount << "\n";
     std::cout << "  TX queues: " << config.txQueueCount << "\n";
-    std::cout << "  MTU: " << config.mtu << "\n";
-    std::cout << "  RSS: " << (config.rss.enabled ? "enabled" : "disabled") << "\n";
+    std::cout << "  MTU: "       << config.mtu << "\n";
+    std::cout << "  RSS: "       << (config.rss.enabled ? "enabled" : "disabled") << "\n";
     std::cout << "  RETA size: " << nic.getReta().size() << "\n\n";
 
-    // ============================================================
-    //  2. ЗАПУСК NIC
-    // ============================================================
-
+    //  ЗАПУСК NIC
     std::thread rxThread{[&] {
         nic.start();  // блокирующий цикл RX-патруля; завершится по nic.stop()
     }};
 
     std::this_thread::sleep_for(std::chrono::milliseconds{60});
 
-    // ============================================================
-    //  3. ОТПРАВКА ПАКЕТОВ
-    // ============================================================
-    std::cout << "Sending packets...\n";
+    //  ОТПРАВКА UDP-ПАКЕТОВ
+    std::cout << "Sending UDP packets...\n";
 
-    auto startTime = std::chrono::steady_clock::now();
-
+    constexpr auto NUM_PACKETS{64};
+    std::vector<std::byte> buffer;
     for (std::size_t i = 0; i < NUM_PACKETS; ++i) {
-        // Разные потоки (разные IP/порты) → разный RSS-хэш
-        std::uint32_t srcIp = 0x0A000001 + (i % NUM_FLOWS);  // 10.0.0.1 + flow
-        std::uint32_t dstIp = 0x0A000002;
-        std::uint16_t srcPort = 1024 + (i % NUM_FLOWS);
-        std::uint16_t dstPort = 80;
-
-        auto raw = makePacket(srcIp, dstIp, srcPort, dstPort,
-                              static_cast<std::uint8_t>(i & 0xFF));
-
-        // Копируем в собственный слот (см. rawBuffers выше)
-        auto* rawPtr = rawBuffers + i * sizeof(TcpPacket);
-        std::memcpy(rawPtr, &raw, sizeof(TcpPacket));
-
-        // Пакет на линии: NIC не владеет data_, а копирует его в свой пул
-        vnic::IncomingPacket packet;
-        packet.data     = rawPtr;
-        packet.length   = sizeof(TcpPacket);
-        packet.hash     = srcIp ^ (srcPort << 16);
-        packet.queueId  = 0;
-        packet.offloads = 0;
-
-        // Отправить в NIC (RX-вход линка)
-        nic.process(std::move(packet));
+        MakeRawUdpPacket(
+            "bb:bb:bb:bb:bb:bb", // srcMac
+            "aa:aa:aa:aa:aa:aa", // dstMac
+            "10.0.0.1",  // srcIp
+            "10.0.0.2", // dstIp
+            1234,   // srcPort
+            4321,   // dstPort
+            buffer
+        );
+        nic.getLink().write(buffer);
     }
-
-    auto endTime = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                       endTime - startTime).count();
-
-    std::cout << "Sent " << NUM_PACKETS << " packets in "
-              << elapsed << " us\n";
-    std::cout << "Rate: " << (NUM_PACKETS * 1'000'000.0 / elapsed)
-              << " packets/sec\n";
 
     // ============================================================
     //  4. ОЖИДАНИЕ ОБРАБОТКИ
@@ -213,19 +213,17 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds{500});
 
     // ============================================================
-    //  5. ПРИЛОЖЕНИЕ ЗАБИРАЕТ ПАКЕТЫ ИЗ RX-ОЧЕРЕДЕЙ (v1 API)
+    //  5. ПРИЛОЖЕНИЕ ЗАБИРАЕТ ПАКЕТЫ ИЗ RX-ОЧЕРЕДЕЙ
     // ============================================================
     std::vector<vnic::PacketDescriptor> rxDescs;
     std::uint64_t received = 0;
-    for (int round = 0; round < 16; ++round) {
-        rxDescs.clear();
-        const auto n = nic.rx(rxDescs);
-        if (n == 0) {
-            break;
-        }
-        received += n;
-        nic.freeRx(rxDescs);
-    }
+    // for (int round = 0; round < 16; ++round) {
+    //     rxDescs.clear();
+    //     const auto n = nic.rx(rxDescs);
+    //     if (n == 0) break;
+    //     received += n;
+    //     nic.freeRx(rxDescs);
+    // }
 
     std::cout << "App received " << received << " packets from RX queues\n";
     std::cout << "Buffer capacity: " << config.rxQueueCount * 512
@@ -277,7 +275,7 @@ int main() {
     //  9. ОСТАНОВКА
     // ============================================================
     std::cout << "Stopping NIC...\n";
-    nic.stop();  // корректно выходит из блокирующего цикла RX-патруля
+    nic.stop();
 
     if (rxThread.joinable()) {
         rxThread.join();

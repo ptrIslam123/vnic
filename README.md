@@ -43,6 +43,12 @@ VNic решает эту проблему:
 
 ---
 
+## Зависимсоти
+```bash
+sudo apt-get update
+sudo apt-get install libnl-3-dev libnl-route-3-dev
+```
+
 ## Сборка
 
 ```bash
