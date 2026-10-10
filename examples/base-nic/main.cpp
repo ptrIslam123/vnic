@@ -65,7 +65,7 @@ void ProducerLoop(vnic::Link& link) {
             buffer
         );
 
-        link.write(buffer);
+        link.putRx(buffer);
         ++packets;
         bytes += buffer.size();
 

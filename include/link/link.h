@@ -26,45 +26,24 @@ public:
     bool configure(const Config& config);
     bool up();
     bool down();
-    bool write(std::span<std::byte> data) {
-        if (data.empty()) {
-            return false;
-        }
-        // allocate from mem pool to save data
-        // memcpy data to allocated memory area
-        // make sapn from alocated memory area
-        // put this span into fifo
 
-        const auto size{data.size()};
-        auto memory{static_cast<std::byte*>(allocator_.allocate(size))};
-        if (!memory) {
-            return false;
-        }
+    bool putRx(std::span<std::byte> packet);
+    std::size_t takeRx(std::vector<std::byte>& packet, std::chrono::milliseconds timeout);
 
-        std::memcpy(memory, data.data(), size);
-        return fifo_.push(std::span<std::byte>{memory, size});
-    }
-
-    std::size_t receive(
-        std::vector<std::byte>& buffer,
-        std::chrono::milliseconds timeout = std::chrono::milliseconds{100}
-    ) {
-        // take from fifo
-        // recopy from fifo slot to buffer
-        // deallocate memoey are back to memory pool
-        auto&& data{fifo_.pop(timeout)};
-        if (!data.has_value()) {
-            return 0;
-        }
-        const auto size{data->size()};
-        buffer.insert(buffer.end(), data->begin(), data->end());
-        allocator_.deallocate(data->data());
-        return size;
-    }
+    bool putTx(std::span<std::byte> packet);
+    std::size_t takeTx(std::vector<std::byte>& packet, std::chrono::milliseconds timeout);
 
 private:
-    Fifo<std::span<std::byte>> fifo_;
-    memory::Allocator allocator_;
+    using Queue = Fifo<std::span<std::byte>>;
+    using Allocator = memory::Allocator;
+
+    static bool put(std::span<std::byte> packet, Queue& queue, Allocator& allocator);
+    static std::size_t take(std::vector<std::byte>& packet, Queue& queue, Allocator& allocator, std::chrono::milliseconds timeout);
+
+    Queue rxQueue_;
+    Queue txQueue_;
+    Allocator rxAllocator_;
+    Allocator txAllocator_;
     Config config_;
 };
 

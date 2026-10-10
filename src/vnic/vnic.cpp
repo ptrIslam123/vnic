@@ -15,7 +15,7 @@ void VNic::poll(std::stop_token stopToken) {
 
     while (!stopToken.stop_requested()) {
         buffer.clear();
-        const auto n{link_.receive(buffer, std::chrono::milliseconds{100})};
+        const auto n{link_.takeRx(buffer, std::chrono::milliseconds{100})};
         if (n == 0) { // by timeout
             continue;
         }
