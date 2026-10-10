@@ -56,10 +56,9 @@ public:
     bool updateReta(Config::Rss::Reta&& reta);
     bool updateReta(const Config::Rss::Reta& reta);
 
+    bool tx(std::uint16_t queueId, std::span<const PacketDescriptor> descs);
     std::int64_t rx(std::uint16_t queueId, std::vector<PacketDescriptor>& descs);
-    std::int64_t rx(std::vector<PacketDescriptor>& descs);
-    bool freeRx(std::uint16_t queueId, std::vector<PacketDescriptor>&& descs);
-    bool freeRx(std::vector<PacketDescriptor>&& descs);
+    bool freeRx(std::uint16_t queueId, std::span<const PacketDescriptor> descs);
 
     void resetStats();
 

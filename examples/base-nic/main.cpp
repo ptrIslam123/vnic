@@ -87,14 +87,14 @@ void ConsumerLoop(vnic::VNic& nic) {
     std::vector<vnic::PacketDescriptor> descs;
     while (g_running.load()) {
         descs.clear();
-        const auto n{nic.rx(descs)};
+        const auto n{nic.rx(0, descs)};
         if (n > 0) {
             for (const auto& desc : descs) {
                 if (desc.buffer) {
                     DumpPacket(desc);
                 }
             }
-            nic.freeRx(std::move(descs));
+            nic.freeRx(0, std::move(descs));
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }

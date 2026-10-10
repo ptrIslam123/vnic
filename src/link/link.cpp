@@ -57,6 +57,12 @@ bool Link::putTx(std::span<std::byte> packet) {
     return put(packet, txQueue_, txAllocator_);
 }
 
+bool Link::putTx(std::span<std::span<std::byte>> jumboPacket) {
+    // TODO
+    assert(false);
+    return true;
+}
+
 std::size_t Link::takeTx(std::vector<std::byte>& packet, std::chrono::milliseconds timeout) {
     return take(packet, txQueue_, txAllocator_, timeout);
 }

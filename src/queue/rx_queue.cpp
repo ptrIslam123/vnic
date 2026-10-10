@@ -69,13 +69,54 @@ std::uint64_t RxQueue::take(std::vector<PacketDescriptor>& descs) {
 
 // Возвращает дескрипторы обратно в пул свободных (буферы вновь могут
 // использоваться для приёма следующих пакетов).
-bool RxQueue::free(std::vector<PacketDescriptor>&& descs) {
-    free_.pushAll(std::span<const PacketDescriptor>{descs});
+bool RxQueue::free(std::span<const PacketDescriptor> descs) {
+    free_.pushAll(descs);
     return true;
 }
-bool RxQueue::free(PacketDescriptor&& desc) {
-    free_.push(desc);
+
+bool RxQueue::configureImpl(const Config& config) {
+    config_ = config;
+
+    const MemPool::Config memConfig{
+        .blockSize = PACKET_BUFFER_SIZE,
+        .capacity  = config_.size,
+        .socketId  = config_.socketId
+    };
+    if (!memPool_.configure(memConfig)) [[unlikely]] {
+        return false;
+    }
+
     return true;
 }
+
+bool RxQueue::startImpl() {
+    free_.reserve(config_.size);
+    used_.reserve(config_.size);
+
+    for (decltype(config_.size) i{0}; i < config_.size; ++i) {
+        PacketDescriptor desc;
+        if (!free_.push(std::move(desc))) [[unlikely]] {
+            // TODO: очислить аллоцированное
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool RxQueue::stopImpl() {
+    while (!free_.isEmpty()) {
+        (void)free_.pop();
+    }
+
+    while (!used_.isEmpty()) {
+        (void)used_.pop();
+    }
+
+    return true;
+}
+
+const RxQueue::Config& RxQueue::getConfig() const { return config_; }
+const stats::Stats& RxQueue::getStats() const { return stats_; }
 
 } // namespace vnic

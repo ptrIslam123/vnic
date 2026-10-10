@@ -67,12 +67,11 @@ void VNic::distribute(const Parser& parser, std::span<const std::byte> packet) {
     }
 }
 
-std::int64_t VNic::rx(std::vector<PacketDescriptor>& descs) {
-    const auto beforeRxSize{descs.size()};
-    for (std::uint64_t queueId{0}; queueId < rxQueues_.size(); ++queueId) {
-        (void)rx(queueId, descs);
+bool VNic::tx(std::uint16_t queueId, std::span<const PacketDescriptor> descs) {
+    if (queueId >= rxQueues_.size()) {
+        return false;
     }
-    return (descs.size() - beforeRxSize);
+    return txQueues_[queueId].put(descs);
 }
 
 std::int64_t VNic::rx(const std::uint16_t queueId, std::vector<PacketDescriptor>& descs) {
@@ -82,20 +81,11 @@ std::int64_t VNic::rx(const std::uint16_t queueId, std::vector<PacketDescriptor>
     return rxQueues_[queueId].take(descs);
 }
 
-bool VNic::freeRx(std::vector<PacketDescriptor>&& descs) {
-    for (PacketDescriptor& desc : descs) {
-        if (rxQueues_[desc.queueId].free(std::move(desc))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool VNic::freeRx(const std::uint16_t queueId, std::vector<PacketDescriptor>&& descs) {
+bool VNic::freeRx(const std::uint16_t queueId, std::span<const PacketDescriptor> descs) {
     if (queueId >= rxQueues_.size()) {
         return false;
     }
-    return rxQueues_[queueId].free(std::move(descs));
+    return rxQueues_[queueId].free(descs);
 }
 
 bool VNic::validate(const Parser& parser) const {
