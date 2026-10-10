@@ -9,23 +9,56 @@ namespace {
 
 namespace vnic {
 
-void VNic::distribute(PacketDescriptor&& packet, std::span<const std::byte> payload) {
+void VNic::poll(std::stop_token stopToken) {
+    std::vector<std::byte> buffer;
+    buffer.reserve(PACKET_BUFFER_SIZE);
+
+    while (!stopToken.stop_requested()) {
+        buffer.clear();
+        const auto n{link_.receive(buffer, std::chrono::milliseconds{100})};
+        if (n == 0) { // by timeout
+            continue;
+        }
+
+        std::span<const std::byte> packet{buffer.data(), n};
+        Parser parser;
+        if (!parser.parse(packet)) [[unlikely]] {
+            //
+            continue;
+        }
+
+        if (!validate(parser)) [[unlikely]] {
+            //
+            continue;
+        }
+
+        distribute(parser, packet);
+    }
+}
+
+void VNic::distribute(const Parser& parser, std::span<const std::byte> packet) {
     assert(!rxQueues_.empty());
+    PacketDescriptor desc;
     const auto& rssConfig{config_.rss};
 
     if (rssConfig.enabled) {
         assert(!reta_.empty() && "RETA is not initialized!");
         assert((reta_.size() & (reta_.size() - 1)) == 0 && "RETA size must be a power of 2!");
-        packet.hash = rss::soft::calc_hash(Get5Tuple(packet), rssConfig.key, rssConfig.hf, rssConfig.protocol);
-        packet.queueId = reta_[packet.hash & (reta_.size() - 1)];
+        desc.hash = rss::soft::CalcHash(
+            Get5Tuple(parser),
+            rssConfig.key,
+            rssConfig.hf,
+            rssConfig.protocol,
+            rssConfig.symmetry
+        );
+        desc.queueId = reta_[desc.hash & (reta_.size() - 1)];
     } else {
-        assert(rxQueues_.size() == 1);
-        packet.queueId = 0;
+        desc.queueId = 0;
     }
 
-    const auto bytes{payload.size()};
-    assert(packet.queueId < rxQueues_.size());
-    if (rxQueues_[packet.queueId].put(std::move(packet), payload)) {
+    const auto bytes{packet.size()};
+    assert(desc.queueId < rxQueues_.size());
+    if (rxQueues_[desc.queueId].put(std::move(desc), packet)) {
         stats_.fetchProcessedPackets();
         stats_.fetchProcessedBytes(bytes);
     } else {
@@ -34,28 +67,39 @@ void VNic::distribute(PacketDescriptor&& packet, std::span<const std::byte> payl
     }
 }
 
+std::int64_t VNic::rx(std::vector<PacketDescriptor>& descs) {
+    const auto beforeRxSize{descs.size()};
+    for (std::uint64_t queueId{0}; queueId < rxQueues_.size(); ++queueId) {
+        (void)rx(queueId, descs);
+    }
+    return (descs.size() - beforeRxSize);
+}
+
 std::int64_t VNic::rx(const std::uint16_t queueId, std::vector<PacketDescriptor>& descs) {
     if (queueId >= rxQueues_.size()) {
-        return -1;
+        return false;
     }
     return rxQueues_[queueId].take(descs);
 }
 
-bool VNic::freeRx(const std::uint16_t queueId, std::vector<PacketDescriptor>&& descs) {
-    // TODO
+bool VNic::freeRx(std::vector<PacketDescriptor>&& descs) {
+    for (PacketDescriptor& desc : descs) {
+        if (rxQueues_[desc.queueId].free(std::move(desc))) {
+            return false;
+        }
+    }
     return true;
 }
 
-bool VNic::validate(const PacketDescriptor& packet) const {
-    return true; //TODO
+bool VNic::freeRx(const std::uint16_t queueId, std::vector<PacketDescriptor>&& descs) {
+    if (queueId >= rxQueues_.size()) {
+        return false;
+    }
+    return rxQueues_[queueId].free(std::move(descs));
 }
 
-bool VNic::l2Filter(const PacketDescriptor& packet) const {
+bool VNic::validate(const Parser& parser) const {
     return true; //TODO
-}
-
-bool VNic::softOffloads(PacketDescriptor& packet) {
-    return true; // TODO
 }
 
 bool VNic::initReta(Config::Rss::Reta& reta) {
@@ -159,43 +203,6 @@ bool VNic::startImpl() {
     return true;
 }
 
-void VNic::poll(std::stop_token stopToken) {
-    std::vector<std::byte> buffer;
-    buffer.reserve(PACKET_BUFFER_SIZE);
-
-    while (!stopToken.stop_requested()) {
-        const auto n{link_.receive(buffer, std::chrono::milliseconds{100})};
-        if (n == 0) { // by timeout
-            continue;
-        }
-
-        link_.waitForBandwidth(n);
-
-        PacketDescriptor packet;
-        if (!Parse(packet, std::span{buffer.data(), n})) [[unlikely]] {
-            //
-            continue;
-        }
-
-        if (!validate(packet)) [[unlikely]] {
-            //
-            continue;
-        }
-
-        if (!l2Filter(packet)) [[unlikely]] {
-            //
-            continue;
-        }
-
-        if (!softOffloads(packet)) [[unlikely]] {
-            //
-            continue;
-        }
-
-        distribute(std::move(packet), buffer);
-    }
-}
-
 bool VNic::stopImpl() {
     thread_.request_stop();
     if (thread_.joinable()) {
@@ -210,11 +217,11 @@ bool VNic::startQueues() {
             return false;
         }
     }
-    for (auto& queue : txQueues_) {
-        if (!queue.start()) [[unlikely]] {
-            return false;
-        }
-    }
+    // for (auto& queue : txQueues_) {
+    //     if (!queue.start()) [[unlikely]] {
+    //         return false;
+    //     }
+    // }
     return true;
 }
 

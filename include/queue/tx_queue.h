@@ -1,6 +1,6 @@
 #pragma once
 
-#include "include/queue/queue.h"
+#include "queue/queue.h"
 
 namespace vnic {
 

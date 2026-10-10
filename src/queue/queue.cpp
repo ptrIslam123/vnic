@@ -7,12 +7,12 @@ namespace vnic {
 bool Queue::configureImpl(const Config& config) {
     config_ = config;
 
-    const memory::Pool::Config memConfig{
+    const MemPool::Config memConfig{
         .blockSize = PACKET_BUFFER_SIZE,
         .capacity  = config_.size,
         .socketId  = config_.socketId
     };
-    if (!memory_.configure(memConfig)) [[unlikely]] {
+    if (!memPool_.configure(memConfig)) [[unlikely]] {
         return false;
     }
 
@@ -24,11 +24,6 @@ bool Queue::startImpl() {
     used_.reserve(config_.size);
 
     for (decltype(config_.size) i{0}; i < config_.size; ++i) {
-        auto buffer{memory_.allocate(PACKET_BUFFER_SIZE)};
-        if (!buffer) [[unlikely]] {
-            return false;
-        }
-
         PacketDescriptor desc;
         if (!free_.push(std::move(desc))) [[unlikely]] {
             // TODO: очислить аллоцированное

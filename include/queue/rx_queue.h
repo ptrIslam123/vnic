@@ -21,7 +21,8 @@ public:
 
     bool put(PacketDescriptor&& packet, std::span<const std::byte> payload);
     std::uint64_t take(std::vector<PacketDescriptor>& descs);
-    void free(std::vector<PacketDescriptor>&& descs);
+    bool free(std::vector<PacketDescriptor>&& descs);
+    bool free(PacketDescriptor&& desc);
 };
 
 } // namespace vnic

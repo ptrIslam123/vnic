@@ -1,6 +1,7 @@
 #pragma once
 
-#include "memory/memory_pool.h"
+#include "constanst.h"
+#include "utils/memory_pool.h"
 #include "utils/fifo.h"
 #include "utils/state_ful.h"
 #include "packet/packet_descriptor.h"
@@ -21,6 +22,7 @@ public:
 
 protected:
     friend utils::Stateful<Queue>;
+    using MemPool = memory::Pool<PACKET_BUFFER_SIZE + sizeof(PacketBuffer)>;
 
     bool configureImpl(const Config& config);
     bool startImpl();
@@ -29,7 +31,7 @@ protected:
     Fifo<PacketDescriptor> free_;
     Fifo<PacketDescriptor> used_;
     stats::Stats stats_;
-    memory::Pool memory_;
+    MemPool memPool_;
     Config config_;
 };
 

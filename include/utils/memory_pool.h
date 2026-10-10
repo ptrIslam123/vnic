@@ -1,9 +1,11 @@
 #pragma once
 
+#include <cstdlib>
 #include <cstdint>
 
 namespace vnic::memory {
 
+template<std::size_t N>
 class Pool final {
 public:
     struct Config {
@@ -11,9 +13,16 @@ public:
         std::uint32_t capacity;
         std::uint32_t socketId;
     };
-    bool configure(const Config& config);
-    void* allocate(std::size_t size);
-    void deallocate(void* ptr);
+    bool configure(const Config& config) {
+        config_ = config;
+        return true;
+    }
+    void* allocate() {
+        return malloc(N);
+    }
+    void deallocate(void* ptr) {
+        free(ptr);
+    }
 
 private:
     Config config_;

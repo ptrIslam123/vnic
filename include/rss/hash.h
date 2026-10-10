@@ -9,10 +9,9 @@ namespace vnic::rss {
 
 enum class HashFunc : std::uint32_t {
     NONE = 0,
-    TOEPLITZ = 1,          // Классический Toeplitz хэш (самый распространенный)
-    SIMPLE_XOR = 2,        // Простой XOR (для тестирования)
-    CRC32 = 4,             // CRC32 (некоторые NIC поддерживают)
-    SYNCE = 8,             // Synchronous Ethernet
+    TOEPLITZ = 1,
+    SIMPLE_XOR = 2,
+    CRC32 = 4,
 };
 
 enum class Protocol : std::uint32_t {
@@ -25,9 +24,19 @@ enum class Protocol : std::uint32_t {
     ALL = IPV4 | IPV6 | TCP | UDP | SCTP
 };
 
+enum class SymmetryMode : std::uint8_t {
+    NONE  = 0,
+    ASYMMETRIC,   // A→B и B→A дают РАЗНЫЕ хэши
+    SYMMETRIC,    // A→B и B→A дают ОДИНАКОВЫЕ хэши
+};
+
 namespace soft {
 
-std::uint32_t calc_hash(const FiveTuple& tuple, std::span<const std::uint8_t> key, HashFunc hf, Protocol protocol);
+std::uint32_t CalcHash(
+    FiveTuple tuple,
+    std::span<const std::uint8_t> key,
+    HashFunc hf, Protocol protocol, SymmetryMode symmetry
+);
 
 } // namespace vnic::rss::soft
 

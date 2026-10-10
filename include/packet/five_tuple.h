@@ -1,6 +1,6 @@
 #pragma once
 
-#include "packet/packet_descriptor.h"
+#include "parser/parser.h"
 
 #include <cstdint>
 
@@ -18,6 +18,6 @@ struct FiveTuple {
     std::uint8_t iproto;
 };
 
-FiveTuple Get5Tuple(const PacketDescriptor& packet);
+FiveTuple Get5Tuple(const Parser& parser);
 
 } // namespace vnic

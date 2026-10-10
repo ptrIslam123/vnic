@@ -1,52 +1,70 @@
 #pragma once
 
+#include "utils/fifo.h"
+#include "utils/allocator.h"
+
 #include <string>
 #include <span>
 #include <thread>
 #include <chrono>
 
 #include <cstdint>
+#include <cstring>
+
+#include <iostream>
 
 namespace vnic {
 
 /*
 этот класс реализует сущность канала.
-она создает virt пару, первый конец доступен для того чтобы в него можно было класть пакеты.
-Второй конец будет принадлежать этому классу, он будет его слушать на наличие income пакетов, и затем отдавать NIC.
-Во врутренний его fifo можно класть как из второго конца virt пары, так и просто вызвать у него метод put что должно положить данные чтобы они стали доступны для NIC
+Это по сути труба, куда с одной стороны можно класть байты пакетов, с другой стороны Nic будет считывать эти данные
 */
 class Link final {
 public:
-    struct Config {
-        bool useVeth;
-        std::string vethIn;
-        std::string vethOut;
-
-        enum class Duplex : std::uint8_t {
-            Full, Half
-        } duplex = Duplex::Full;
-        bool autoNegotiation;
-        std::uint32_t speedMbps;
-    };
+    struct Config {};
 
     bool configure(const Config& config);
     bool up();
     bool down();
-    void write(std::span<std::byte> data);
+    bool write(std::span<std::byte> data) {
+        if (data.empty()) {
+            return false;
+        }
+        // allocate from mem pool to save data
+        // memcpy data to allocated memory area
+        // make sapn from alocated memory area
+        // put this span into fifo
+
+        const auto size{data.size()};
+        auto memory{static_cast<std::byte*>(allocator_.allocate(size))};
+        if (!memory) {
+            return false;
+        }
+
+        std::memcpy(memory, data.data(), size);
+        return fifo_.push(std::span<std::byte>{memory, size});
+    }
+
     std::size_t receive(
         std::vector<std::byte>& buffer,
         std::chrono::milliseconds timeout = std::chrono::milliseconds{100}
-    );
-    void waitForBandwidth(std::size_t bytes);
+    ) {
+        // take from fifo
+        // recopy from fifo slot to buffer
+        // deallocate memoey are back to memory pool
+        auto&& data{fifo_.pop(timeout)};
+        if (!data.has_value()) {
+            return 0;
+        }
+        const auto size{data->size()};
+        buffer.insert(buffer.end(), data->begin(), data->end());
+        allocator_.deallocate(data->data());
+        return size;
+    }
 
 private:
-    bool constructVethPair(const std::string& vethIn, const std::string& vethOut);
-    bool destructVethPair(const std::string& vethIn, const std::string& vethOut);
-    int openVeth(const std::string& veth);
-
-    std::uint64_t speedBytesPerSecond_;
-    std::uint64_t lastReadTime_;
-    int fd_;
+    Fifo<std::span<std::byte>> fifo_;
+    memory::Allocator allocator_;
     Config config_;
 };
 
