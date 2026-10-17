@@ -31,7 +31,6 @@ public:
     std::size_t takeRx(std::vector<std::byte>& packet, std::chrono::milliseconds timeout);
 
     bool putTx(std::span<std::byte> packet);
-    bool putTx(std::span<std::span<std::byte>> jumboPacket);
     std::size_t takeTx(std::vector<std::byte>& packet, std::chrono::milliseconds timeout);
 
 private:

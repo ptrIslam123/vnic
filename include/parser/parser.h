@@ -47,6 +47,12 @@ public:
     L1Protocol l1Protocol() const noexcept;
     const ethhdr* eth() const noexcept;
 
+    // VLAN ID из L1 (0, если кадр без VLAN-тега)
+    std::uint16_t vlanId() const noexcept;
+
+    // Смещение до заголовка L2 (сеть): Eth (14) + VLAN-тег (4), если есть
+    std::size_t l2Offset() const noexcept;
+
     L2Protocol l2Protocol() const noexcept;
     const iphdr* ipv4() const noexcept;
     const ipv6hdr* ipv6() const noexcept;
@@ -94,6 +100,7 @@ private:
     L1 l1_;
     L2 l2_;
     L3 l3_;
+    std::size_t l2Offset_{0};
 };
 
 std::ostream& operator<<(std::ostream& os, const Parser& p);

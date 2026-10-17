@@ -276,6 +276,7 @@ bool Parser::parse(std::span<const std::byte> data) {
     }
 
     //  L2
+    l2Offset_ = offset;
     switch (etherType) {
         case ETH_P_IP: return parseIpv4(data, offset);
         case ETH_P_ARP: return parseArp(data, offset);
@@ -355,10 +356,21 @@ Parser::L1Protocol Parser::l1Protocol() const noexcept {
 }
 
 const ethhdr* Parser::eth() const noexcept {
-    if (l1_.protocol != L1Protocol::Eth) {
+    if (l1_.protocol != L1Protocol::Eth && l1_.protocol != L1Protocol::Vlan) {
         return nullptr;
     }
     return l1_.eth;
+}
+
+std::uint16_t Parser::vlanId() const noexcept {
+    if (l1_.protocol != L1Protocol::Vlan) {
+        return 0;
+    }
+    return l1_.vlanId;
+}
+
+std::size_t Parser::l2Offset() const noexcept {
+    return l2Offset_;
 }
 
 Parser::L2Protocol Parser::l2Protocol() const noexcept {

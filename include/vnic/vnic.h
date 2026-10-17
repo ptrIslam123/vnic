@@ -5,10 +5,12 @@
 #include "queue/tx_queue.h"
 #include "rss/hash.h"
 #include "utils/state_ful.h"
+#include "validate/validate.h"
 
 #include <vector>
 #include <span>
 #include <thread>
+#include <array>
 
 #include <cstdint>
 
@@ -24,8 +26,10 @@ public:
     VNic& operator=(const VNic&) = delete;
     VNic& operator=(VNic&&) = delete;
 
-    enum class ErrorCode {
-        // TODO
+    enum class ErrorCode : std::uint8_t {
+        None = 0,
+        Error,
+        // TODO: детализировать коды по мере появления причин отказа
     };
 
     struct Config {
@@ -48,6 +52,7 @@ public:
 
         std::string macAddr;
         std::vector<std::string> ipAddrs;
+        std::vector<std::uint16_t> vlanAllowList; // пустой список = VLAN-фильтр выключен
         Link::Config link;
     };
 
@@ -56,7 +61,7 @@ public:
     bool updateReta(Config::Rss::Reta&& reta);
     bool updateReta(const Config::Rss::Reta& reta);
 
-    bool tx(std::uint16_t queueId, std::span<const PacketDescriptor> descs);
+    bool tx(std::uint16_t queueId, std::span<PacketDescriptor> descs);
     std::int64_t rx(std::uint16_t queueId, std::vector<PacketDescriptor>& descs);
     bool freeRx(std::uint16_t queueId, std::span<const PacketDescriptor> descs);
 
@@ -84,7 +89,7 @@ private:
     bool configureQueues();
     bool configureLink();
 
-    bool validate(const Parser& parser) const;
+    bool validate(std::span<const std::byte> packet, const Parser& parser) const;
 
     void distribute(const Parser& parser, std::span<const std::byte> payload);
     void poll(std::stop_token stopToken);
@@ -101,7 +106,8 @@ private:
     std::vector<RxQueue::Config> rxQueueConfigs_;
     std::vector<TxQueue::Config> txQueueConfigs_;
     Config config_;
-    enum ErrorCode eCode_;
+    std::array<std::uint8_t, 6> macAddr_{};
+    ErrorCode eCode_{ErrorCode::None};
 
     std::jthread thread_;
 };

@@ -18,9 +18,25 @@ template<typename T>
 class Fifo final {
 public:
 
-    Fifo() {}
-    Fifo(const Fifo& ) {}
-    Fifo& operator=(const Fifo& ) { return *this; }
+    Fifo() = default;
+
+    Fifo(const Fifo&) = delete;
+    Fifo& operator=(const Fifo&) = delete;
+
+    Fifo(Fifo&& other) noexcept {
+        std::scoped_lock lock{other.mutex_};
+        queue_ = std::move(other.queue_);
+        wake_ = other.wake_;
+    }
+
+    Fifo& operator=(Fifo&& other) noexcept {
+        if (this != &other) {
+            std::scoped_lock lock{mutex_, other.mutex_};
+            queue_ = std::move(other.queue_);
+            wake_ = other.wake_;
+        }
+        return *this;
+    }
 
     template<typename... Args>
     bool emplace(Args&&... args) {

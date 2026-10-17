@@ -2,50 +2,63 @@
 #include "packet/packet_buffer.h"
 #include "constanst.h"
 
-#include <array>
+#include <vector>
 
-#include <cassert>
+#include <cstdint>
+#include <cstring>
 
 namespace vnic {
 
-bool TxQueue::put(std::span<const PacketDescriptor> descs) {
-    for (auto desc : descs) {
-        if (!put(std::move(desc))) [[unlikely]] {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool TxQueue::put(PacketDescriptor&& desc) {
-    if (desc.buffer) [[unlikely]] {
-        assert(desc.buffer);
-        return false;
-    }
+    assert(desc.buffer);
 
-    std::array<std::span<std::byte>, MAX_SEGMENTS> segments;
+    std::size_t segments{0};
+    std::size_t total{0};
     PacketBuffer* it{desc.buffer};
-    std::size_t i{0};
     do {
-        segments[i++] = it->getPacket();
-        if (i > segments.size()) {
-            assert(i <= segments.size());
+        if (segments >= MAX_SEGMENTS) [[unlikely]] {
+            stats_.fetchDroppedPackets();
+            stats_.fetchDroppedBytes(desc.totalLength);
             return false;
         }
+        ++segments;
+        total += it->length;
         it = it->next;
     } while (it);
 
-    if (link_->putTx(std::span<std::span<std::byte>>{ segments.data(), i + 1 })) {
-        stats_.fetchProcessedPackets();
-        stats_.fetchProcessedBytes(desc.totalLength);
-    } else {
+    assert(total == desc.totalLength);
+
+    std::vector<std::byte> packet;
+    packet.resize(total);
+
+    std::size_t offset{0};
+    it = desc.buffer;
+    do {
+        const auto& segment{it->getPacket()};
+        std::memcpy(packet.data() + offset, segment.data(), segment.size());
+        offset += segment.size();
+        it = it->next;
+    } while (it);
+
+    if (link_ == nullptr) [[unlikely]] {
         stats_.fetchDroppedPackets();
         stats_.fetchDroppedBytes(desc.totalLength);
+        return false;
     }
+    if (!link_->putTx(packet)) [[unlikely]] {
+        stats_.fetchDroppedPackets();
+        stats_.fetchDroppedBytes(desc.totalLength);
+        return false;
+    }
+
+    stats_.fetchProcessedPackets();
+    stats_.fetchProcessedBytes(desc.totalLength);
+    return true;
 }
 
-bool TxQueue::configureImpl(const Config& config) {
+bool TxQueue::configureImpl(const Config& config, Link& link) {
     config_ = config;
+    link_ = &link;
     return true;
 }
 

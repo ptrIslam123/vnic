@@ -31,7 +31,11 @@ bool Link::put(std::span<std::byte> packet, Queue& queue, Allocator& allocator) 
     }
 
     std::memcpy(memory, packet.data(), size);
-    return queue.push(std::span<std::byte>{memory, size});
+    if (!queue.push(std::span<std::byte>{memory, size})) [[unlikely]] {
+        allocator.deallocate(memory);
+        return false;
+    }
+    return true;
 }
 
 std::size_t Link::take(std::vector<std::byte>& packet, Queue& queue, Allocator& allocator, std::chrono::milliseconds timeout) {
@@ -55,12 +59,6 @@ std::size_t Link::takeRx(std::vector<std::byte>& packet, std::chrono::millisecon
 
 bool Link::putTx(std::span<std::byte> packet) {
     return put(packet, txQueue_, txAllocator_);
-}
-
-bool Link::putTx(std::span<std::span<std::byte>> jumboPacket) {
-    // TODO
-    assert(false);
-    return true;
 }
 
 std::size_t Link::takeTx(std::vector<std::byte>& packet, std::chrono::milliseconds timeout) {

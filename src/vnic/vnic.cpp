@@ -23,12 +23,16 @@ void VNic::poll(std::stop_token stopToken) {
         std::span<const std::byte> packet{buffer.data(), n};
         Parser parser;
         if (!parser.parse(packet)) [[unlikely]] {
-            //
+            stats_.fetchErrors();
+            stats_.fetchDroppedPackets();
+            stats_.fetchDroppedBytes(n);
             continue;
         }
 
-        if (!validate(parser)) [[unlikely]] {
-            //
+        if (!validate(packet, parser)) [[unlikely]] {
+            stats_.fetchErrors();
+            stats_.fetchDroppedPackets();
+            stats_.fetchDroppedBytes(n);
             continue;
         }
 
@@ -67,18 +71,24 @@ void VNic::distribute(const Parser& parser, std::span<const std::byte> packet) {
     }
 }
 
-bool VNic::tx(std::uint16_t queueId, std::span<const PacketDescriptor> descs) {
-    if (queueId >= rxQueues_.size()) {
+bool VNic::tx(std::uint16_t queueId, std::span<PacketDescriptor> descs) {
+    if (queueId >= txQueues_.size()) {
         return false;
     }
-    return txQueues_[queueId].put(descs);
+    for (auto&& desc : descs) {
+        if (!txQueues_[queueId].put(std::move(desc))) [[unlikely]] {
+            return false;
+        }
+    }
+    return true;
 }
 
+// Возвращает число изъятых дескрипторов (>= 0) либо -1, если queueId неверный.
 std::int64_t VNic::rx(const std::uint16_t queueId, std::vector<PacketDescriptor>& descs) {
     if (queueId >= rxQueues_.size()) {
-        return false;
+        return -1;
     }
-    return rxQueues_[queueId].take(descs);
+    return static_cast<std::int64_t>(rxQueues_[queueId].take(descs));
 }
 
 bool VNic::freeRx(const std::uint16_t queueId, std::span<const PacketDescriptor> descs) {
@@ -88,8 +98,14 @@ bool VNic::freeRx(const std::uint16_t queueId, std::span<const PacketDescriptor>
     return rxQueues_[queueId].free(descs);
 }
 
-bool VNic::validate(const Parser& parser) const {
-    return true; //TODO
+bool VNic::validate(std::span<const std::byte> packet, const Parser& parser) const {
+    return (validate::CheckFrameSize(packet, parser, MIN_FRAME_SIZE, config_.mtu)
+        && validate::CheckFcs(packet)
+        && validate::CheckDstMac(parser, macAddr_, config_.promiscuousEnabled)
+        && validate::CheckVlanFilter(parser, config_.vlanAllowList)
+        && validate::CheckIpTotalLength(packet, parser)
+        && validate::CheckIpv4Checksum(packet, parser)
+    );
 }
 
 bool VNic::initReta(Config::Rss::Reta& reta) {
@@ -123,16 +139,24 @@ bool VNic::initReta(Config::Rss::Reta& reta) {
 
 bool VNic::configureImpl(const Config& config) {
     config_ = config;
+    eCode_ = ErrorCode::None;
+
+    if (const auto mac = validate::ParseMac(config_.macAddr)) {
+        macAddr_ = *mac;
+    }
 
     if (!configureLink()) [[unlikely]] {
+        eCode_ = ErrorCode::Error;
         return false;
     }
 
     if (!configureQueues()) [[unlikely]] {
+        eCode_ = ErrorCode::Error;
         return false;
     }
 
     if (!configureRss()) [[unlikely]] {
+        eCode_ = ErrorCode::Error;
         return false;
     }
 
@@ -181,7 +205,7 @@ bool VNic::configureImpl(const std::uint16_t queueId, const TxQueue::Config& con
     if (queueId >= txQueues_.size()) [[unlikely]] {
         return false;
     }
-    return txQueues_[queueId].configure(config);
+    return txQueues_[queueId].configure(config, link_);
 }
 
 bool VNic::startImpl() {
@@ -207,11 +231,11 @@ bool VNic::startQueues() {
             return false;
         }
     }
-    // for (auto& queue : txQueues_) {
-    //     if (!queue.start()) [[unlikely]] {
-    //         return false;
-    //     }
-    // }
+    for (auto& queue : txQueues_) {
+        if (!queue.start()) [[unlikely]] {
+            return false;
+        }
+    }
     return true;
 }
 
