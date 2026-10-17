@@ -67,11 +67,16 @@ void VNic::distribute(const Parser& parser, std::span<const std::byte> packet) {
     }
 }
 
-bool VNic::tx(std::uint16_t queueId, std::span<const PacketDescriptor> descs) {
-    if (queueId >= rxQueues_.size()) {
+bool VNic::tx(std::uint16_t queueId, std::span<PacketDescriptor> descs) {
+    if (queueId >= txQueues_.size()) {
         return false;
     }
-    return txQueues_[queueId].put(descs);
+    for (auto&& desc : descs) {
+        if (!txQueues_[queueId].put(std::move(desc))) [[unlikely]] {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::int64_t VNic::rx(const std::uint16_t queueId, std::vector<PacketDescriptor>& descs) {
@@ -181,7 +186,7 @@ bool VNic::configureImpl(const std::uint16_t queueId, const TxQueue::Config& con
     if (queueId >= txQueues_.size()) [[unlikely]] {
         return false;
     }
-    return txQueues_[queueId].configure(config);
+    return txQueues_[queueId].configure(config, link_);
 }
 
 bool VNic::startImpl() {
@@ -207,11 +212,11 @@ bool VNic::startQueues() {
             return false;
         }
     }
-    // for (auto& queue : txQueues_) {
-    //     if (!queue.start()) [[unlikely]] {
-    //         return false;
-    //     }
-    // }
+    for (auto& queue : txQueues_) {
+        if (!queue.start()) [[unlikely]] {
+            return false;
+        }
+    }
     return true;
 }
 

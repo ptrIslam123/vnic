@@ -3,8 +3,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <csignal>
+#include <cstring>
 #include <iostream>
+#include <span>
 #include <thread>
 #include <vector>
 #include <random>
@@ -101,6 +104,65 @@ void ConsumerLoop(vnic::VNic& nic) {
     }
 }
 
+void TxProducerLoop(vnic::VNic& nic) {
+    std::uint64_t packets{};
+    const std::string srcMac = "cc:cc:cc:cc:cc:cc";
+    const std::string dstMac = "dd:dd:dd:dd:dd:dd";
+    const std::string srcIp  = "192.168.0.1";
+    const std::string dstIp  = "192.168.0.2";
+
+    std::mt19937 rng{std::random_device{}()};
+    std::uniform_int_distribution<int> sleepDist{1, 100};
+
+    while (g_running.load(std::memory_order_relaxed)) {
+        std::vector<std::byte> payload(64);
+        std::memset(payload.data(), 0xAB, payload.size());
+
+        std::vector<std::byte> packet;
+        packet.reserve(2048);
+        MakeUdpPacket(
+            srcMac, dstMac,
+            srcIp, dstIp,
+            7777, 53,
+            payload,
+            packet
+        );
+
+        auto* buffer{static_cast<vnic::PacketBuffer*>(std::malloc(sizeof(vnic::PacketBuffer) + packet.size()))};
+        if (!buffer) {
+            continue;
+        }
+        buffer->next = nullptr;
+        buffer->length = static_cast<std::uint32_t>(packet.size());
+        std::memcpy(buffer->getPacket().data(), packet.data(), packet.size());
+
+        vnic::PacketDescriptor desc;
+        desc.totalLength = static_cast<std::uint32_t>(packet.size());
+        desc.buffer = buffer;
+
+        if (nic.tx(0, std::span{&desc, 1})) {
+            ++packets;
+            std::cout << "TX-PRODUCER: sent packet to queue 0: length=" << packet.size() << std::endl;
+        } else {
+            std::cerr << "TX-PRODUCER: dropped packet\n";
+        }
+        std::free(buffer);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds{sleepDist(rng)});
+    }
+}
+
+void TxConsumerLoop(vnic::Link& link) {
+    std::vector<std::byte> packet;
+    while (g_running.load()) {
+        packet.clear();
+        const auto n{link.takeTx(packet, std::chrono::milliseconds{100})};
+        if (n > 0) {
+            std::cout << "TX-CONSUMER: received " << n << " bytes through TX path\n";
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -164,13 +226,22 @@ int main() {
     std::thread producerThread{ [&] {
         ProducerLoop(nic.getLink());
     }};
+    std::thread txProducerThread{ [&] {
+        TxProducerLoop(nic);
+    }};
+    std::thread txConsumerThread{ [&] {
+        TxConsumerLoop(nic.getLink());
+    }};
 
-    (void)nic.start();
+    if (!nic.start()) {
+        std::cerr << "Failed to start NIC\n";
+        return 1;
+    }
 
     producerThread.join();
     consumerThread.join();
-
-    std::this_thread::sleep_for(std::chrono::hours(2));
+    txProducerThread.join();
+    txConsumerThread.join();
 
     std::cout << "\nStopping...\n";
     (void)nic.stop();

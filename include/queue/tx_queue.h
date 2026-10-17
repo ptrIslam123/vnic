@@ -14,7 +14,6 @@ public:
     struct Config {};
 
     bool put(PacketDescriptor&& desc);
-    bool put(std::span<const PacketDescriptor> descs);
 
     const Config& getConfig() const;
     const stats::Stats& getStats() const;
@@ -22,7 +21,7 @@ public:
 private:
     friend utils::Stateful<TxQueue>;
 
-    bool configureImpl(const Config& config);
+    bool configureImpl(const Config& config, Link& link);
     bool startImpl();
     bool stopImpl();
 
