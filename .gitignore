@@ -5,3 +5,4 @@ CMakeLists.txt.*
 cmake-build*
 build
 *.o
+dock/api

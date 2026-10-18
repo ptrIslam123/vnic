@@ -18,14 +18,10 @@ constexpr std::size_t kEthernetHeaderBytes{14};
 constexpr std::array<std::uint8_t, 6> kBroadcastMac{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // Broadcast: все байты адреса равны 0xFF.
-bool IsBroadcast(const std::uint8_t* mac) {
-    return std::memcmp(mac, kBroadcastMac.data(), kBroadcastMac.size()) == 0;
-}
+bool IsBroadcast(const std::uint8_t* mac) { return std::memcmp(mac, kBroadcastMac.data(), kBroadcastMac.size()) == 0; }
 
 // Multicast: младший бит первого байта MAC-адреса выставлен (I/G bit).
-bool IsMulticast(const std::uint8_t* mac) {
-    return (mac[0] & 0x01U) != 0;
-}
+bool IsMulticast(const std::uint8_t* mac) { return (mac[0] & 0x01U) != 0; }
 
 } // namespace
 
@@ -46,14 +42,15 @@ std::optional<std::array<std::uint8_t, 6>> ParseMac(const std::string& mac) {
 }
 
 // Проверка — размер кадра (runts и MTU).
-// Реальный NIC отбрасывает «короткие» кадры (runts) короче 64 байт: на проводе
-// это 60 байт полезных данных + 4 байта FCS. Слишком короткий кадр считается
-// ошибкой MAC/PHY и не доставляется приложению.
+// Реальный NIC отбрасывает «короткие» кадры (runts); на проводе это 64 байта
+// (60 данных + 4 FCS). В этой модели Link передаёт байты БЕЗ FCS, поэтому
+// порог minFrameSize = 60 байт. Слишком короткий кадр считается ошибкой MAC/PHY
+// и не доставляется приложению.
 // Сверху MTU ограничивает размер L3-нагрузки (заголовок IP + данные), а не
 // полного кадра: на проводе к ней добавляется заголовок канального уровня (L2),
 // включая возможный VLAN-тег. Поэтому верхняя граница — l2Offset + mtu.
-bool CheckFrameSize(std::span<const std::byte> packet, const Parser& parser,
-                    std::size_t minFrameSize, std::uint32_t mtu) {
+bool CheckFrameSize(std::span<const std::byte> packet, const Parser& parser, std::size_t minFrameSize,
+                    std::uint32_t mtu) {
     const auto l2HeaderBytes{parser.l2Offset() != 0 ? parser.l2Offset() : kEthernetHeaderBytes};
     return packet.size() >= minFrameSize && packet.size() <= l2HeaderBytes + mtu;
 }
@@ -73,9 +70,7 @@ bool CheckFcs(std::span<const std::byte> packet) {
 // Реальный NIC принимает кадр, только если dst MAC совпадает с собственным
 // unicast-адресом карты, является broadcast (ff:ff:ff:ff:ff:ff) или multicast.
 // В promiscuous-режиме фильтр отключён и принимается любой адрес назначения.
-bool CheckDstMac(const Parser& parser,
-                 const std::array<std::uint8_t, 6>& macAddr,
-                 bool promiscuousEnabled) {
+bool CheckDstMac(const Parser& parser, const std::array<std::uint8_t, 6>& macAddr, bool promiscuousEnabled) {
     if (promiscuousEnabled) {
         return true;
     }
@@ -135,7 +130,7 @@ bool CheckIpTotalLength(std::span<const std::byte> packet, const Parser& parser)
 
     const auto headerBytes = static_cast<std::size_t>(ip->ihl) * 4;
     const auto totalLength = static_cast<std::size_t>(ntohs(ip->tot_len));
-    const auto l2Offset = parser.l2Offset();
+    const auto l2Offset    = parser.l2Offset();
 
     if (headerBytes < kIpv4MinHeaderBytes) {
         return false;
@@ -165,7 +160,7 @@ bool CheckIpv4Checksum(std::span<const std::byte> packet, const Parser& parser) 
     }
 
     const auto headerBytes = static_cast<std::size_t>(ip->ihl) * 4;
-    const auto l2Offset = parser.l2Offset();
+    const auto l2Offset    = parser.l2Offset();
     if (headerBytes < kIpv4MinHeaderBytes || l2Offset + headerBytes > packet.size()) {
         return false;
     }

@@ -10,7 +10,11 @@
 namespace vnic {
 
 bool TxQueue::put(PacketDescriptor&& desc) {
-    assert(desc.buffer);
+    if (desc.buffer == nullptr) [[unlikely]] {
+        stats_.fetchDroppedPackets();
+        stats_.fetchDroppedBytes(desc.totalLength);
+        return false;
+    }
 
     std::size_t segments{0};
     std::size_t total{0};
@@ -58,24 +62,16 @@ bool TxQueue::put(PacketDescriptor&& desc) {
 
 bool TxQueue::configureImpl(const Config& config, Link& link) {
     config_ = config;
-    link_ = &link;
+    link_   = &link;
     return true;
 }
 
-bool TxQueue::startImpl() {
-    return true;
-}
+bool TxQueue::startImpl() { return true; }
 
-bool TxQueue::stopImpl() {
-    return true;
-}
+bool TxQueue::stopImpl() { return true; }
 
-const TxQueue::Config& TxQueue::getConfig() const {
-    return config_;
-}
+const TxQueue::Config& TxQueue::getConfig() const { return config_; }
 
-const stats::Stats& TxQueue::getStats() const {
-    return stats_;
-}
+const stats::Stats& TxQueue::getStats() const { return stats_; }
 
 } // namespace vnic

@@ -1,0 +1,69 @@
+---
+# Style for the vnic library (clang-format 18+).
+# Apply to the whole tree:  cmake --build build --target format
+Language: Cpp
+BasedOnStyle: LLVM
+
+Standard: c++20
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+NamespaceIndentation: None
+AccessModifierOffset: -4
+IndentCaseLabels: false
+IndentPPDirectives: None
+
+# Braces and single-line constructs
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: true
+
+# Line width and breaking
+ColumnLimit: 120
+BinPackArguments: true
+BinPackParameters: true
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+BreakConstructorInitializers: AfterColon
+BreakInheritanceList: BeforeColon
+PenaltyBreakBeforeFirstCallParameter: 19
+AlignAfterOpenBracket: Align
+
+# Pointers and references
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Spaces
+SpaceBeforeParens: ControlStatements
+SpaceAfterCStyleCast: false
+SpaceBeforeRangeBasedForLoopColon: true
+Cpp11BracedListStyle: true
+
+# Alignment
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: Consecutive
+AlignTrailingComments: true
+AlignOperands: Align
+AlignEscapedNewlines: Left
+
+# Namespaces / includes / comments
+FixNamespaceComments: true
+SortUsingDeclarations: true
+SortIncludes: Never
+IncludeBlocks: Preserve
+ReflowComments: true
+CommentPragmas: '^ NOLINT|^ IWYU'
+EmptyLineBeforeAccessModifier: LogicalBlock
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+...

@@ -1,11 +1,10 @@
 #include "vnic/vnic.h"
 #include "parser/parser.h"
+#include "clock/clock.h"
 
 #include <cassert>
 
-namespace {
-
-} // namespace
+namespace {} // namespace
 
 namespace vnic {
 
@@ -14,6 +13,11 @@ void VNic::poll(std::stop_token stopToken) {
     buffer.reserve(PACKET_BUFFER_SIZE);
 
     while (!stopToken.stop_requested()) {
+        if (!link_.isUp()) [[unlikely]] {
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            continue;
+        }
+
         buffer.clear();
         const auto n{link_.takeRx(buffer, std::chrono::milliseconds{100})};
         if (n == 0) { // by timeout
@@ -43,20 +47,29 @@ void VNic::poll(std::stop_token stopToken) {
 void VNic::distribute(const Parser& parser, std::span<const std::byte> packet) {
     assert(!rxQueues_.empty());
     PacketDescriptor desc;
+    desc.timestamp = clock::monotonic::Now();
+    desc.vlanId    = parser.vlanId();
     const auto& rssConfig{config_.rss};
 
-    if (rssConfig.enabled) {
-        assert(!reta_.empty() && "RETA is not initialized!");
-        assert((reta_.size() & (reta_.size() - 1)) == 0 && "RETA size must be a power of 2!");
-        desc.hash = rss::soft::CalcHash(
-            Get5Tuple(parser),
-            rssConfig.key,
-            rssConfig.hf,
-            rssConfig.protocol,
-            rssConfig.symmetry
-        );
-        desc.queueId = reta_[desc.hash & (reta_.size() - 1)];
+    // RSS применим только к IP-потокам: у ARP и прочих не-IP кадров нет
+    // 5-tuple. Как и реальный NIC, такие кадры не хэшируем, а направляем в
+    // очередь по умолчанию (0).
+    const auto l2{parser.l2Protocol()};
+    const auto rssHashable{l2 == Parser::L2Protocol::Ipv4 || l2 == Parser::L2Protocol::Ipv6};
+
+    if (rssConfig.enabled && rssHashable) {
+        desc.hash =
+            rss::soft::CalcHash(Get5Tuple(parser), rssConfig.key, rssConfig.hf, rssConfig.protocol, rssConfig.symmetry);
+        // Читаем один элемент под shared_lock, не копируя всю таблицу.
+        desc.queueId = reta_.read([&](const Config::Rss::Reta& reta) -> std::uint16_t {
+            if (reta.empty()) {
+                return 0;
+            }
+            assert((reta.size() & (reta.size() - 1)) == 0 && "RETA size must be a power of 2!");
+            return reta[desc.hash & (reta.size() - 1)];
+        });
     } else {
+        desc.hash    = 0;
         desc.queueId = 0;
     }
 
@@ -71,16 +84,24 @@ void VNic::distribute(const Parser& parser, std::span<const std::byte> packet) {
     }
 }
 
-bool VNic::tx(std::uint16_t queueId, std::span<PacketDescriptor> descs) {
+std::size_t VNic::tx(std::uint16_t queueId, std::span<PacketDescriptor> descs) {
     if (queueId >= txQueues_.size()) {
-        return false;
+        return 0;
     }
+
+    std::size_t transmitted{0};
     for (auto&& desc : descs) {
+        const auto length{desc.totalLength};
         if (!txQueues_[queueId].put(std::move(desc))) [[unlikely]] {
-            return false;
+            stats_.fetchTxDroppedPackets();
+            stats_.fetchTxDroppedBytes(length);
+            break;
         }
+        stats_.fetchTransmittedPackets();
+        stats_.fetchTransmittedBytes(length);
+        ++transmitted;
     }
-    return true;
+    return transmitted;
 }
 
 // Возвращает число изъятых дескрипторов (>= 0) либо -1, если queueId неверный.
@@ -99,28 +120,24 @@ bool VNic::freeRx(const std::uint16_t queueId, std::span<const PacketDescriptor>
 }
 
 bool VNic::validate(std::span<const std::byte> packet, const Parser& parser) const {
-    return (validate::CheckFrameSize(packet, parser, MIN_FRAME_SIZE, config_.mtu)
-        && validate::CheckFcs(packet)
-        && validate::CheckDstMac(parser, macAddr_, config_.promiscuousEnabled)
-        && validate::CheckVlanFilter(parser, config_.vlanAllowList)
-        && validate::CheckIpTotalLength(packet, parser)
-        && validate::CheckIpv4Checksum(packet, parser)
-    );
+    return (validate::CheckFrameSize(packet, parser, MIN_FRAME_SIZE, config_.mtu) && validate::CheckFcs(packet) &&
+            validate::CheckDstMac(parser, macAddr_, config_.promiscuousEnabled) &&
+            validate::CheckVlanFilter(parser, config_.vlanAllowList) && validate::CheckIpTotalLength(packet, parser) &&
+            validate::CheckIpv4Checksum(packet, parser));
 }
 
 bool VNic::initReta(Config::Rss::Reta& reta) {
-    const auto& rssConfig{config_.rss};
-    assert(rssConfig.enabled);
+    assert(config_.rss.enabled);
 
     if (!config_.rss.reta.empty()) {
         const auto size = config_.rss.reta.size();
         if ((size & (size - 1)) != 0) {
-            return false;  // RETA size must be a power of 2!
+            return false; // RETA size must be a power of 2!
         }
 
         for (auto queueId : config_.rss.reta) {
             if (queueId >= config_.rxQueueCount) {
-                return false;  // invalid queue idx
+                return false; // invalid queue idx
             }
         }
 
@@ -139,9 +156,18 @@ bool VNic::initReta(Config::Rss::Reta& reta) {
 
 bool VNic::configureImpl(const Config& config) {
     config_ = config;
-    eCode_ = ErrorCode::None;
+    eCode_  = ErrorCode::None;
 
-    if (const auto mac = validate::ParseMac(config_.macAddr)) {
+    // Пустой macAddr допустим (оставляем нулевой адрес), но непустой и
+    // нераспознанный — ошибка конфигурации: иначе молча получим нулевой MAC и
+    // при выключенном promiscuous собственные unicast-кадры будут дропаться.
+    macAddr_ = {};
+    if (!config_.macAddr.empty()) {
+        const auto mac = validate::ParseMac(config_.macAddr);
+        if (!mac) [[unlikely]] {
+            eCode_ = ErrorCode::Error;
+            return false;
+        }
         macAddr_ = *mac;
     }
 
@@ -190,9 +216,7 @@ bool VNic::configureRss() {
     return updateReta(std::move(reta));
 }
 
-bool VNic::configureLink() {
-    return link_.configure(config_.link);
-}
+bool VNic::configureLink() { return link_.configure(config_.link); }
 
 bool VNic::configureImpl(const std::uint16_t queueId, const RxQueue::Config& config) {
     if (queueId >= rxQueues_.size()) [[unlikely]] {
@@ -254,50 +278,53 @@ bool VNic::stopQueues() {
 }
 
 bool VNic::updateReta(Config::Rss::Reta&& reta) {
-    reta_ = std::move(reta); //! TODO: пока не потока-безопасно
+    if (reta.empty()) {
+        return false;
+    }
+
+    const auto size{reta.size()};
+    if ((size & (size - 1)) != 0) {
+        return false; // размер RETA должен быть степенью двойки
+    }
+
+    for (const auto queueId : reta) {
+        if (queueId >= config_.rxQueueCount) {
+            return false; // некорректный индекс очереди
+        }
+    }
+
+    reta_.write(std::move(reta));
     return true;
 }
 
-bool VNic::updateReta(const Config::Rss::Reta& reta) {
-    return updateReta(Config::Rss::Reta{reta});
+bool VNic::updateReta(const Config::Rss::Reta& reta) { return updateReta(Config::Rss::Reta{reta}); }
+
+void VNic::resetStats() { stats_.reset(); }
+
+Link& VNic::getLink() { return link_; }
+
+const Link& VNic::getLink() const { return link_; }
+
+const stats::Stats& VNic::getStats() const { return stats_; }
+
+enum VNic::ErrorCode VNic::getErrorCode() const { return eCode_; }
+
+VNic::Config::Rss::Reta VNic::getReta() const { return reta_.snapshot(); }
+
+const VNic::Config& VNic::getConfig() const { return config_; }
+
+const RxQueue* VNic::getRxQueue(std::uint16_t queueId) const {
+    if (queueId >= rxQueues_.size()) {
+        return nullptr;
+    }
+    return &rxQueues_[queueId];
 }
 
-void VNic::resetStats() {
-    stats_.reset();
-}
-
-Link& VNic::getLink() {
-    return link_;
-}
-
-const Link& VNic::getLink() const {
-    return link_;
-}
-
-const stats::Stats& VNic::getStats() const {
-    return stats_;
-}
-
-enum VNic::ErrorCode VNic::getErrorCode() const {
-    return eCode_;
-}
-
-const VNic::Config::Rss::Reta& VNic::getReta() const {
-    return reta_;
-}
-
-const VNic::Config& VNic::getConfig() const {
-    return config_;
-}
-
-const RxQueue& VNic::getRxQueue(std::uint16_t queueId) const {
-    assert(queueId < rxQueues_.size());
-    return rxQueues_[queueId];
-}
-
-const TxQueue& VNic::getTxQueue(std::uint16_t queueId) const {
-    assert(queueId < txQueues_.size());
-    return txQueues_[queueId];
+const TxQueue* VNic::getTxQueue(std::uint16_t queueId) const {
+    if (queueId >= txQueues_.size()) {
+        return nullptr;
+    }
+    return &txQueues_[queueId];
 }
 
 } // namespace vnic

@@ -13,7 +13,11 @@ namespace vnic {
 bool RxQueue::put(PacketDescriptor&& desc, std::span<const std::byte> packet) {
     const auto bytes{packet.size()};
     assert(packet.size() == bytes && "payload size must match packet.length");
-    if (bytes == 0 || free_.isEmpty()) [[unlikely]] {
+    if (bytes == 0) [[unlikely]] {
+        return false;
+    }
+    if (free_.isEmpty()) [[unlikely]] {
+        stats_.fetchOverflows();
         return false;
     }
 
@@ -24,7 +28,8 @@ bool RxQueue::put(PacketDescriptor&& desc, std::span<const std::byte> packet) {
     std::array<PacketBuffer*, MAX_SEGMENTS> buffers;
     std::uint64_t bufferIdx{0};
     utils::ScopedGuard buffersGuard{[&] {
-        for (std::uint64_t j{0}; j < bufferIdx; ++j) memPool_.deallocate(buffers[j]);
+        for (std::uint64_t j{0}; j < bufferIdx; ++j)
+            memPool_.deallocate(buffers[j]);
     }};
     for (; bufferIdx < segments; ++bufferIdx) {
         buffers[bufferIdx] = static_cast<PacketBuffer*>(memPool_.allocate());
@@ -39,11 +44,11 @@ bool RxQueue::put(PacketDescriptor&& desc, std::span<const std::byte> packet) {
         auto buffer{buffers[segmentIdx]};
         const auto chunk{std::min<std::size_t>(PACKET_BUFFER_SIZE, bytes - offset)};
         buffer->length = static_cast<std::uint32_t>(chunk);
-        buffer->next = (segmentIdx + 1 < segments) ? buffers[segmentIdx + 1] : nullptr;
+        buffer->next   = (segmentIdx + 1 < segments) ? buffers[segmentIdx + 1] : nullptr;
         std::memcpy(reinterpret_cast<std::byte*>(buffer + 1), packet.data() + offset, chunk);
         offset += chunk;
     }
-    desc.buffer = buffers[0];
+    desc.buffer      = buffers[0];
     desc.totalLength = static_cast<std::uint32_t>(bytes);
 
     (void)free_.pop();
@@ -67,9 +72,16 @@ std::uint64_t RxQueue::take(std::vector<PacketDescriptor>& descs) {
     return n;
 }
 
-// Возвращает дескрипторы обратно в пул свободных (буферы вновь могут
-// использоваться для приёма следующих пакетов).
+// Возвращает дескрипторы обратно в пул свободных и освобождает ВСЮ цепочку
+// буферов пакета (все сегменты через поле next, а не только первый).
 bool RxQueue::free(std::span<const PacketDescriptor> descs) {
+    for (const PacketDescriptor& desc : descs) {
+        for (PacketBuffer* segment{desc.buffer}; segment != nullptr;) {
+            PacketBuffer* next = segment->next;
+            memPool_.deallocate(segment);
+            segment = next;
+        }
+    }
     free_.pushAll(descs);
     return true;
 }
@@ -78,10 +90,7 @@ bool RxQueue::configureImpl(const Config& config) {
     config_ = config;
 
     const MemPool::Config memConfig{
-        .blockSize = PACKET_BUFFER_SIZE,
-        .capacity  = config_.size,
-        .socketId  = config_.socketId
-    };
+        .blockSize = PACKET_BUFFER_SIZE, .capacity = config_.size, .socketId = config_.socketId};
     if (!memPool_.configure(memConfig)) [[unlikely]] {
         return false;
     }

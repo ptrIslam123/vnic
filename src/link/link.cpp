@@ -1,20 +1,5 @@
 #include "link/link.h"
-#include "utils/scoped_guard.h"
-#include "clock/clock.h"
 
-#include <netlink/netlink.h>
-#include <netlink/route/link/veth.h>
-
-#include <sys/types.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netpacket/packet.h>
-#include <net/if.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <net/ethernet.h>
-
-#include <cassert>
 #include <cstring>
 
 namespace vnic {
@@ -38,7 +23,8 @@ bool Link::put(std::span<std::byte> packet, Queue& queue, Allocator& allocator) 
     return true;
 }
 
-std::size_t Link::take(std::vector<std::byte>& packet, Queue& queue, Allocator& allocator, std::chrono::milliseconds timeout) {
+std::size_t Link::take(std::vector<std::byte>& packet, Queue& queue, Allocator& allocator,
+                       std::chrono::milliseconds timeout) {
     auto&& data{queue.pop(timeout)};
     if (!data.has_value()) {
         return 0;
@@ -49,17 +35,13 @@ std::size_t Link::take(std::vector<std::byte>& packet, Queue& queue, Allocator& 
     return size;
 }
 
-bool Link::putRx(std::span<std::byte> packet) {
-    return put(packet, rxQueue_, rxAllocator_);
-}
+bool Link::putRx(std::span<std::byte> packet) { return put(packet, rxQueue_, rxAllocator_); }
 
 std::size_t Link::takeRx(std::vector<std::byte>& packet, std::chrono::milliseconds timeout) {
     return take(packet, rxQueue_, rxAllocator_, timeout);
 }
 
-bool Link::putTx(std::span<std::byte> packet) {
-    return put(packet, txQueue_, txAllocator_);
-}
+bool Link::putTx(std::span<std::byte> packet) { return put(packet, txQueue_, txAllocator_); }
 
 std::size_t Link::takeTx(std::vector<std::byte>& packet, std::chrono::milliseconds timeout) {
     return take(packet, txQueue_, txAllocator_, timeout);
@@ -71,11 +53,15 @@ bool Link::configure(const Config& config) {
 }
 
 bool Link::up() {
+    up_ = true;
     return true;
 }
 
 bool Link::down() {
+    up_ = false;
     return true;
 }
+
+bool Link::isUp() const noexcept { return up_; }
 
 } // namespace vnic

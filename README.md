@@ -32,31 +32,88 @@ VNic решает эту проблему:
 
 ## Ключевые возможности
 
+Реализовано (0.1.0):
+
 - **Очереди RX/TX** с кольцевыми буферами и дескрипторами
-- **RSS** (Receive Side Scaling) с настраиваемыми хэш-функциями (Toeplitz, XOR, CRC32)
-- **RETA** (Redirection Table) с проверкой на степень двойки
-- **Цепочки пакетов** (`next`) для Jumbo Frames и TSO
-- **Пулы буферов** (memory pool) с предварительным выделением
-- **Link** с настраиваемой скоростью, дуплексом и задержкой
-- **Статистика** по NIC и по каждой очереди отдельно
-- **Zero-copy** через указатели и дескрипторы
+- **Парсер кадров**: Ethernet, VLAN (802.1Q/802.1AD), IPv4, IPv6, ARP, TCP/UDP/ICMP
+- **RSS** с настраиваемыми хэш-функциями (Toeplitz, XOR, CRC32) для IPv4 и IPv6
+- **RETA** (Redirection Table): проверка на степень двойки, потокобезопасное обновление (RCU)
+- **Проверки на приёме**: размер кадра (runts/MTU), FCS, фильтр dst MAC, VLAN-фильтр, IPv4 total length и checksum
+- **Цепочки пакетов** (`next`) для Jumbo Frames
+- **Link** (in-memory): состояние up/down, скорость/дуплекс
+- **Статистика** по NIC (RX и TX) и по каждой очереди отдельно
+- **Работа через дескрипторы и буферы**
+
+Запланировано (см. `dock/архитектура.md`):
+
+- **Пулы буферов** с предварительным выделением (сейчас — заглушка на `malloc`)
+- **NUMA-aware** пулы и привязка очередей к NUMA-узлам
+- **Оффлоады** (checksum/TSO/VLAN offload)
 
 ---
 
-## Зависимсоти
-```bash
-sudo apt-get update
-sudo apt-get install libnl-3-dev libnl-route-3-dev
-```
+## Зависимости
+
+Внешних зависимостей нет: нужны только компилятор с C++20 и CMake ≥ 3.18.
+GoogleTest подтягивается автоматически (только для сборки тестов).
 
 ## Сборка
 
 ```bash
 git clone <repo>
 cd vnic
-mkdir build && cd build
-cmake ..
-make
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
 ```
 
-**VNic — тестируйте сеть так, как будто у вас есть железо.** 🚀
+## Тесты
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+## Установка и подключение
+
+```bash
+cmake --install build --prefix /usr/local
+```
+
+Затем в своём проекте:
+
+```cmake
+find_package(vnic 0.1 REQUIRED)
+target_link_libraries(my_app PRIVATE vnic::vnic)
+```
+
+## Форматирование кода
+
+Стиль задаётся `.clang-format` в корне (clang-format 18+), исключения — в
+`.clang-format-ignore`. Требуется установленный `clang-format`.
+
+```bash
+cmake --build build --target format        # переформатировать код на месте
+cmake --build build --target check-format  # только проверка (для CI)
+```
+
+Или напрямую: `clang-format -i <files>`. Таргеты не входят в сборку по умолчанию
+(отключаются опцией `-DVNIC_FORMAT_TARGETS=OFF`).
+
+## Документация
+
+- `dock/архитектура.md` — архитектура и устройство подсистем.
+- API-документация генерируется из Doxygen-комментариев в заголовках
+  (`include/`). Сборка (требуется `doxygen`):
+
+```bash
+cmake -S . -B build -DVNIC_BUILD_DOCS=ON
+cmake --build build --target vnic-docs
+# результат: dock/api/html/index.html
+```
+
+Или напрямую: `doxygen Doxyfile`.
+
+> **Важно:** таргет `vnic-docs` не входит в сборку по умолчанию, поэтому
+> документация **не** перегенерируется при каждой сборке (`cmake --build build`).
+> Doxygen запускается только явной командой `--target vnic-docs` (и только если
+> проект сконфигурирован с `-DVNIC_BUILD_DOCS=ON`). Для авто-перегенерации
+> добавьте в `CMakeLists.txt` строку `add_dependencies(vnic vnic-docs)`.
