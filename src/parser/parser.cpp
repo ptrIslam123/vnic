@@ -217,7 +217,16 @@ std::ostream& operator<<(std::ostream& os, const Parser& p) {
     return os;
 }
 
+void Parser::reset() noexcept {
+    l1_       = L1{};
+    l2_       = L2{};
+    l3_       = L3{};
+    l2Offset_ = 0;
+}
+
 bool Parser::parse(std::span<const std::byte> data) {
+    reset();
+
     if (data.size() < sizeof(ethhdr)) {
         return false;
     }

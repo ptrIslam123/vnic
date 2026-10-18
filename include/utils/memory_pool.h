@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstddef>
 #include <cstdlib>
 #include <cstdint>
 
@@ -33,6 +35,26 @@ public:
         std::uint32_t socketId{0};  ///< NUMA socket hint (reserved).
     };
 
+    Pool() = default;
+
+    Pool(const Pool&)            = delete;
+    Pool& operator=(const Pool&) = delete;
+
+    /// @brief Move the configuration and allocation counters.
+    Pool(Pool&& other) noexcept :
+        config_(other.config_), live_(other.live_.load(std::memory_order_relaxed)),
+        total_(other.total_.load(std::memory_order_relaxed)) {}
+
+    /// @brief Move-assign the configuration and allocation counters.
+    Pool& operator=(Pool&& other) noexcept {
+        if (this != &other) {
+            config_ = other.config_;
+            live_.store(other.live_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            total_.store(other.total_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+        return *this;
+    }
+
     /// @brief Apply configuration (currently just stores it).
     bool configure(const Config& config) {
         config_ = config;
@@ -40,13 +62,36 @@ public:
     }
 
     /// @brief Allocate one block of @p N bytes; `nullptr` on failure.
-    void* allocate() { return malloc(N); }
+    void* allocate() {
+        void* ptr = std::malloc(N);
+        if (ptr != nullptr) {
+            live_.fetch_add(1, std::memory_order_relaxed);
+            total_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return ptr;
+    }
 
     /// @brief Release a block obtained from `allocate()`.
-    void deallocate(void* ptr) { free(ptr); }
+    void deallocate(void* ptr) {
+        if (ptr != nullptr) {
+            live_.fetch_sub(1, std::memory_order_relaxed);
+        }
+        std::free(ptr);
+    }
+
+    /// @brief Last applied configuration.
+    const Config& getConfig() const noexcept { return config_; }
+
+    /// @brief Number of blocks currently allocated and not yet released.
+    std::size_t liveBlocks() const noexcept { return live_.load(std::memory_order_relaxed); }
+
+    /// @brief Number of blocks ever allocated since construction.
+    std::size_t totalBlocks() const noexcept { return total_.load(std::memory_order_relaxed); }
 
 private:
     Config config_;
+    std::atomic<std::size_t> live_{0};
+    std::atomic<std::size_t> total_{0};
 };
 
 /// @}

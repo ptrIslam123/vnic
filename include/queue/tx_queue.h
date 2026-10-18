@@ -47,6 +47,11 @@ public:
     /// @brief Per-queue statistics.
     const stats::Stats& getStats() const;
 
+    /// @brief Link this queue transmits into, or `nullptr` if not configured.
+    ///
+    /// Diagnostic accessor used to observe the queue's internal state in tests.
+    const Link* getLink() const noexcept;
+
 private:
     /// @cond INTERNAL
     friend utils::Stateful<TxQueue>;

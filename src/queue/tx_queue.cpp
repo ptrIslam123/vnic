@@ -74,4 +74,6 @@ const TxQueue::Config& TxQueue::getConfig() const { return config_; }
 
 const stats::Stats& TxQueue::getStats() const { return stats_; }
 
+const Link* TxQueue::getLink() const noexcept { return link_; }
+
 } // namespace vnic

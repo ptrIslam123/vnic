@@ -56,6 +56,9 @@ public:
     /// @brief Apply link parameters.
     bool configure(const Config& config);
 
+    /// @brief Link parameters (also used to observe configuration in tests).
+    const Config& getConfig() const noexcept { return config_; }
+
     /// @brief Bring the link up (enables RX polling).
     bool up();
 

@@ -102,6 +102,23 @@ private:
     MemPool memPool_;
     stats::Stats stats_;
     Config config_;
+
+public:
+    /// @name Introspection
+    /// Diagnostic accessors used to observe the queue's internal state in tests.
+    /// Not part of the steady-state API.
+    /// @{
+
+    /// @brief Pool of descriptors available for `put()` (`free_`).
+    const Fifo<PacketDescriptor>& getFree() const noexcept { return free_; }
+
+    /// @brief FIFO of descriptors holding received data (`used_`).
+    const Fifo<PacketDescriptor>& getUsed() const noexcept { return used_; }
+
+    /// @brief Underlying packet memory pool (`memPool_`).
+    const MemPool& getMemPool() const noexcept { return memPool_; }
+
+    /// @}
 };
 
 /// @}

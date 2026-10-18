@@ -67,7 +67,20 @@ public:
     };
 
     /**
+     * @brief Reset the parser to its initial (unparsed) state.
+     *
+     * Clears every header pointer and protocol back to `None`. Called
+     * automatically at the start of `parse()`, so a parser can be reused
+     * across frames without leaking state from a previous frame.
+     */
+    void reset() noexcept;
+
+    /**
      * @brief Parse an Ethernet frame.
+     *
+     * Resets the parser first, then walks the frame once. On failure the
+     * parser is left holding only what was parsed up to the failure point.
+     *
      * @param data Raw frame bytes (without FCS).
      * @return `true` if the frame was parsed; `false` if it is malformed or
      *         truncated.
