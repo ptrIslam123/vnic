@@ -11,11 +11,12 @@ PROJECT_NAME           = "vnic"
 PROJECT_NUMBER         = 0.1.0
 PROJECT_BRIEF          = "Userspace NIC emulation library"
 OUTPUT_DIRECTORY       = dock/api
+OUTPUT_LANGUAGE        = English
 
 # ------------------------------------------------------------------ input
 INPUT                  = include \
                          README.md \
-                         dock/архитектура.md
+                         dock/architecture.md
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.md
 USE_MDFILE_AS_MAINPAGE = README.md

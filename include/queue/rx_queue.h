@@ -1,9 +1,10 @@
 #pragma once
 
-#include "constanst.h"
+#include <expected>
+#include "constants.h"
 #include "utils/memory_pool.h"
 #include "utils/fifo.h"
-#include "utils/state_ful.h"
+#include "utils/stateful.h"
 #include "stats/stats.h"
 #include "packet/packet_descriptor.h"
 
@@ -39,7 +40,7 @@ namespace vnic {
  * segments. The application calls `VNic::rx()` to drain @c used and
  * `VNic::freeRx()` to return descriptors and buffers to the queue.
  *
- * @note Follows the @ref utils::Stateful automate; must be configured and
+ * @note Follows the @ref utils::Stateful automaton; must be configured and
  *       started before use.
  */
 class RxQueue final : public utils::Stateful<RxQueue> {
@@ -51,7 +52,31 @@ public:
         std::uint16_t queueId{0};  ///< Queue index within the port.
         std::uint32_t size{512};   ///< Number of descriptors (queue depth).
         std::uint32_t socketId{0}; ///< NUMA socket hint (reserved).
+
+        /// @brief Validate the configuration before it is applied.
+        [[nodiscard]] bool isValid() const noexcept;
     };
+
+    /// @brief Construct a stopped queue.
+    RxQueue() = default;
+    /// @brief Queues are non-copyable.
+    RxQueue(const RxQueue&) = delete;
+    /// @brief Queues are non-copyable.
+    RxQueue& operator=(const RxQueue&) = delete;
+    /// @brief Move a stopped queue.
+    RxQueue(RxQueue&&) noexcept = default;
+    /// @brief Move-assign a stopped queue.
+    RxQueue& operator=(RxQueue&&) noexcept = default;
+    ~RxQueue();
+
+    /**
+     * @brief Start the queue.
+     *
+     * If the queue is still stopped, it is first configured with the last
+     * applied configuration (default @ref Config for a fresh queue), so a queue
+     * can be started without an explicit `configure()` call.
+     */
+    [[nodiscard]] std::expected<void, ErrorCode> start();
 
     /**
      * @brief Accept one frame.
@@ -62,24 +87,28 @@ public:
      * @param desc   Descriptor to fill (@ref PacketDescriptor::buffer and
      *               @ref PacketDescriptor::totalLength are overwritten).
      * @param packet Raw frame bytes.
-     * @return `true` on success; `false` on empty input, a full queue
-     *         (increments `overflows`) or pool exhaustion.
+     * @return An empty `std::expected` on success; otherwise
+     *         `ErrorCode::QueueZeroLengthPacket`, `ErrorCode::QueuePacketTooLarge`,
+     *         `ErrorCode::QueueSegmentLimitExceeded`, `ErrorCode::QueueFreeListEmpty`
+     *         (increments `overflows`), `ErrorCode::QueueUsedListFull` or the
+     *         memory pool error.
      */
-    bool put(PacketDescriptor&& desc, std::span<const std::byte> packet);
+    [[nodiscard]] std::expected<void, ErrorCode> put(PacketDescriptor&& desc, std::span<const std::byte> packet);
 
     /**
-     * @brief Drain up to @ref MAX_SEGMENTS descriptors into @p descs.
+     * @brief Drain up to `kMaxSegments` descriptors into @p descs.
      * @param descs Output; received descriptors are appended.
      * @return Number of descriptors appended (non-blocking).
      */
-    std::uint64_t take(std::vector<PacketDescriptor>& descs);
+    [[nodiscard]] std::uint64_t take(std::vector<PacketDescriptor>& descs);
 
     /**
      * @brief Return descriptors (and the whole buffer chains) to the pool.
      * @param descs Descriptors previously obtained from `take()`.
-     * @return `true`.
+     * @return `ErrorCode::QueueFreeListFull` if the free list cannot accept
+     *         all descriptors; the chains are released regardless.
      */
-    bool free(std::span<const PacketDescriptor> descs);
+    [[nodiscard]] std::expected<void, ErrorCode> free(std::span<const PacketDescriptor> descs);
 
     /// @brief Queue configuration.
     const Config& getConfig() const;
@@ -91,11 +120,13 @@ private:
     /// @cond INTERNAL
     friend utils::Stateful<RxQueue>;
     /// @endcond
-    using MemPool = memory::Pool<PACKET_BUFFER_SIZE + sizeof(PacketBuffer)>;
+    using MemPool = memory::Pool<kPacketBufferSize + sizeof(PacketBuffer)>;
 
-    bool configureImpl(const Config& config);
-    bool startImpl();
-    bool stopImpl();
+    std::expected<void, ErrorCode> configureImpl(const Config& config);
+    std::expected<void, ErrorCode> startImpl();
+    std::expected<void, ErrorCode> stopImpl();
+
+    void releaseChain(PacketBuffer* head) noexcept;
 
     Fifo<PacketDescriptor> free_;
     Fifo<PacketDescriptor> used_;

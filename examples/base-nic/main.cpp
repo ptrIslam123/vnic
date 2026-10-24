@@ -1,27 +1,17 @@
-#include "vnic/vnic.h"
 #include "parser/parser.h"
+#include "vnic/vnic.h"
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
-#include <cstdlib>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <random>
 #include <span>
 #include <thread>
 #include <vector>
-#include <random>
-
-#include <arpa/inet.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/udp.h>
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/udp.h>
 
 #include "../common.h"
 
@@ -60,11 +50,14 @@ void ProducerLoop(vnic::Link& link) {
         buffer.clear();
         MakeUdpPacket(srcMac, dstMac, srcIp, dstIp, srcPort, dstPort, payload, buffer);
 
-        link.putRx(buffer);
-        ++packets;
-        bytes += buffer.size();
+        if (auto pushed = link.putRx(buffer); !pushed) {
+            std::cerr << "PRODUCER: dropped packet (RX link queue is full)\n";
+        } else {
+            ++packets;
+            bytes += buffer.size();
 
-        std::cout << "PRODUCER: Generated a new packet: length=" << buffer.size() << std::endl;
+            std::cout << "PRODUCER: Generated a new packet: length=" << buffer.size() << std::endl;
+        }
 
         // Эмуляция задержки
         std::this_thread::sleep_for(std::chrono::milliseconds{sleepUs});
@@ -82,14 +75,20 @@ void ConsumerLoop(vnic::VNic& nic) {
     std::vector<vnic::PacketDescriptor> descs;
     while (g_running.load()) {
         descs.clear();
-        const auto n{nic.rx(0, descs)};
-        if (n > 0) {
+        const auto taken{nic.rx(0, descs)};
+        if (!taken) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            continue;
+        }
+        if (*taken > 0) {
             for (const auto& desc : descs) {
                 if (desc.buffer) {
                     DumpPacket(desc);
                 }
             }
-            nic.freeRx(0, std::move(descs));
+            if (auto freed = nic.freeRx(0, descs); !freed) {
+                std::cerr << "CONSUMER: failed to free RX descriptors\n";
+            }
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }
@@ -126,7 +125,8 @@ void TxProducerLoop(vnic::VNic& nic) {
         desc.totalLength = static_cast<std::uint32_t>(packet.size());
         desc.buffer      = buffer;
 
-        if (nic.tx(0, std::span{&desc, 1}) > 0) {
+        const auto sent{nic.tx(0, std::span{&desc, 1})};
+        if (sent && *sent > 0) {
             ++packets;
             std::cout << "TX-PRODUCER: sent packet to queue 0: length=" << packet.size() << std::endl;
         } else {
@@ -142,9 +142,9 @@ void TxConsumerLoop(vnic::Link& link) {
     std::vector<std::byte> packet;
     while (g_running.load()) {
         packet.clear();
-        const auto n{link.takeTx(packet, std::chrono::milliseconds{100})};
-        if (n > 0) {
-            std::cout << "TX-CONSUMER: received " << n << " bytes through TX path\n";
+        const auto taken{link.takeTx(packet, std::chrono::milliseconds{100})};
+        if (taken && *taken > 0) {
+            std::cout << "TX-CONSUMER: received " << *taken << " bytes through TX path\n";
         }
     }
 }
@@ -165,9 +165,9 @@ int main() {
     config.mtu                = 1500;
     config.promiscuousEnabled = true;
 
-    config.macAddr        = "aa:bb:cc:dd:ee:ff";
-    config.link.speedMbps = 1000;
-    config.link.duplex    = vnic::Link::Config::Duplex::Full;
+    config.macAddr           = "aa:bb:cc:dd:ee:ff";
+    config.link.rxQueueDepth = 1024;
+    config.link.txQueueDepth = 1024;
 
     config.rss.enabled  = true;
     config.rss.hf       = vnic::rss::HashFunc::TOEPLITZ;
@@ -179,7 +179,7 @@ int main() {
     };
     config.rss.symmetry = vnic::rss::SymmetryMode::SYMMETRIC;
 
-    if (!nic.configure(config)) {
+    if (auto configured = nic.configure(config); !configured) {
         std::cerr << "Failed to configure NIC\n";
         return 1;
     }
@@ -189,7 +189,7 @@ int main() {
         rxConfig.queueId  = q;
         rxConfig.size     = 512;
         rxConfig.socketId = 0;
-        if (!nic.configure(q, rxConfig)) {
+        if (auto configured = nic.configure(q, rxConfig); !configured) {
             std::cerr << "Failed to configure RX queue " << q << "\n";
             return 1;
         }
@@ -197,18 +197,18 @@ int main() {
 
     for (std::uint16_t q = 0; q < config.txQueueCount; ++q) {
         vnic::TxQueue::Config txConfig;
-        if (!nic.configure(q, txConfig)) {
+        if (auto configured = nic.configure(q, txConfig); !configured) {
             std::cerr << "Failed to configure TX queue " << q << "\n";
             return 1;
         }
     }
 
-    if (!nic.getLink().up()) {
+    if (auto up = nic.getLink().up(); !up) {
         std::cerr << "Failed to bring link up\n";
         return 1;
     }
 
-    if (!nic.start()) {
+    if (auto started = nic.start(); !started) {
         std::cerr << "Failed to start NIC\n";
         return 1;
     }

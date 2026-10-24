@@ -2,8 +2,8 @@
 
 #include "packet/five_tuple.h"
 
-#include <span>
 #include <cstdint>
+#include <span>
 
 /**
  * @file
@@ -49,7 +49,7 @@ namespace soft {
 /**
  * @brief Compute an RSS hash for a flow in software.
  *
- * @param tuple     Flow 5-tuple (see @ref vnic::Get5Tuple).
+ * @param tuple     Flow 5-tuple (see `Get5Tuple()`).
  * @param key       RSS key. Toeplitz requires at least 40 bytes; shorter keys
  *                  yield a hash of 0.
  * @param hf        Hash function to apply.

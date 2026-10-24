@@ -20,10 +20,6 @@ struct Coupled {
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// Construction
-// ---------------------------------------------------------------------------
-
 TEST(RcuTest, DefaultConstructedValueIsValueInitialized) {
     vnic::utils::Rcu<int> rcu;
 
@@ -47,10 +43,6 @@ TEST(RcuTest, IsNotCopyable) {
     static_assert(!std::is_copy_assignable_v<vnic::utils::Rcu<int>>);
     SUCCEED();
 }
-
-// ---------------------------------------------------------------------------
-// read
-// ---------------------------------------------------------------------------
 
 TEST(RcuTest, ReadInvokesCallbackWithCurrentValue) {
     vnic::utils::Rcu<int> rcu{21};

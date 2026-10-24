@@ -2,8 +2,8 @@
 
 #include <linux/ip.h>
 #include <linux/ipv6.h>
-#include <linux/udp.h>
 #include <linux/tcp.h>
+#include <linux/udp.h>
 
 namespace vnic {
 
@@ -12,12 +12,12 @@ namespace vnic {
 FiveTuple Get5Tuple(const Parser& parser) {
     FiveTuple tuple{};
 
-    if (const auto* ip{parser.ipv4()}) {
+    if (const auto ip{parser.ipv4()}) {
         tuple.version = FiveTuple::kIpv4;
         tuple.saddr4  = ip->saddr;
         tuple.daddr4  = ip->daddr;
         tuple.iproto  = static_cast<std::uint8_t>(ip->protocol);
-    } else if (const auto* ip6{parser.ipv6()}) {
+    } else if (const auto ip6{parser.ipv6()}) {
         tuple.version = FiveTuple::kIpv6;
         tuple.saddr6  = ip6->saddr;
         tuple.daddr6  = ip6->daddr;
@@ -28,14 +28,14 @@ FiveTuple Get5Tuple(const Parser& parser) {
 
     switch (parser.l3Protocol()) {
     case Parser::L3Protocol::Tcp: {
-        if (const auto* tcp{parser.tcp()}) {
+        if (const auto tcp{parser.tcp()}) {
             tuple.sport = tcp->source;
             tuple.dport = tcp->dest;
         }
         break;
     }
     case Parser::L3Protocol::Udp: {
-        if (const auto* udp{parser.udp()}) {
+        if (const auto udp{parser.udp()}) {
             tuple.sport = udp->source;
             tuple.dport = udp->dest;
         }

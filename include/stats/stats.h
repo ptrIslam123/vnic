@@ -21,11 +21,11 @@ namespace vnic::stats {
  *
  * The class stays copyable (it is embedded in `VNic` and in each queue and is
  * returned by value from `getStats()`), so its members are plain
- * `std::uint64_t` rather than `std::atomic`. Atomicity is provided per operation
- * through the `__atomic_*` builtins (GCC/Clang): reads use `__atomic_load_n`,
- * increments `__atomic_fetch_add`, reset `__atomic_store_n`. Relaxed ordering is
- * sufficient for pure counters because no cross-thread memory ordering is
- * required.
+ * `std::uint64_t` rather than `std::atomic`. Atomicity is provided per
+ * operation through the `__atomic_*` builtins (GCC/Clang): reads use
+ * `__atomic_load_n`, increments `__atomic_fetch_add`, reset `__atomic_store_n`.
+ * Relaxed ordering is sufficient for pure counters because no cross-thread
+ * memory ordering is required.
  *
  * Each queue keeps its own object, so a single event is not double-counted.
  */

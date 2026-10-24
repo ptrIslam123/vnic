@@ -4,5 +4,7 @@
 CMakeLists.txt.*
 cmake-build*
 build
+build-*/
 *.o
 dock/api
+graphify-out/

@@ -6,8 +6,6 @@
 #include <cstring>
 
 #include <arpa/inet.h>
-#include <net/ethernet.h>
-#include <netinet/ip.h>
 
 namespace vnic::validate {
 
@@ -75,8 +73,8 @@ bool CheckDstMac(const Parser& parser, const std::array<std::uint8_t, 6>& macAdd
         return true;
     }
 
-    const auto* eth = parser.eth();
-    if (eth == nullptr) {
+    const auto eth = parser.eth();
+    if (!eth) {
         return true; // не Ethernet-кадр — фильтровать по MAC нечего
     }
 
@@ -123,8 +121,8 @@ bool CheckIpTotalLength(std::span<const std::byte> packet, const Parser& parser)
         return true;
     }
 
-    const auto* ip = parser.ipv4();
-    if (ip == nullptr) {
+    const auto ip = parser.ipv4();
+    if (!ip) {
         return true;
     }
 
@@ -154,8 +152,8 @@ bool CheckIpv4Checksum(std::span<const std::byte> packet, const Parser& parser) 
         return true;
     }
 
-    const auto* ip = parser.ipv4();
-    if (ip == nullptr) {
+    const auto ip = parser.ipv4();
+    if (!ip) {
         return true;
     }
 
@@ -165,7 +163,7 @@ bool CheckIpv4Checksum(std::span<const std::byte> packet, const Parser& parser) 
         return false;
     }
 
-    const auto* bytes = reinterpret_cast<const std::uint8_t*>(ip);
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(packet.data() + l2Offset);
     std::uint32_t sum{0};
     for (std::size_t i = 0; i + 1 < headerBytes; i += 2) {
         sum += (static_cast<std::uint32_t>(bytes[i]) << 8) | bytes[i + 1];

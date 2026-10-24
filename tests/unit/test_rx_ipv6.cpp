@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "vnic/vnic.h"
 #include "packet/packet_descriptor.h"
+#include "vnic/vnic.h"
 
 #include <chrono>
 #include <cstdint>
@@ -83,22 +83,22 @@ vnic::VNic::Config MakeConfig() {
 // распределяться с реальным RSS-хэшем (не 0, как было при отсутствии парсинга).
 TEST(VnicIpv6, Ipv6UdpFrameIsParsedAndHashed) {
     vnic::VNic nic;
-    ASSERT_TRUE(nic.configure(MakeConfig()));
+    ASSERT_TRUE(nic.configure(MakeConfig()).has_value());
 
     vnic::RxQueue::Config queueConfig;
     queueConfig.queueId = 0;
     queueConfig.size    = 16;
-    ASSERT_TRUE(nic.configure(0, queueConfig));
+    ASSERT_TRUE(nic.configure(0, queueConfig).has_value());
 
-    ASSERT_TRUE(nic.getLink().up());
-    ASSERT_TRUE(nic.start());
+    ASSERT_TRUE(nic.getLink().up().has_value());
+    ASSERT_TRUE(nic.start().has_value());
 
     auto frame = MakeIpv6UdpPacket();
-    ASSERT_TRUE(nic.getLink().putRx(frame));
+    ASSERT_TRUE(nic.getLink().putRx(frame).has_value());
 
     std::vector<vnic::PacketDescriptor> descs;
     for (int attempt = 0; attempt < 50 && descs.empty(); ++attempt) {
-        nic.rx(0, descs);
+        (void)nic.rx(0, descs);
         if (descs.empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
@@ -108,6 +108,6 @@ TEST(VnicIpv6, Ipv6UdpFrameIsParsedAndHashed) {
     EXPECT_EQ(descs[0].queueId, 0u);
     EXPECT_NE(descs[0].hash, 0u);
 
-    EXPECT_TRUE(nic.freeRx(0, descs));
+    EXPECT_TRUE(nic.freeRx(0, descs).has_value());
     (void)nic.stop();
 }

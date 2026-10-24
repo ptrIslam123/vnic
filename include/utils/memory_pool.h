@@ -1,9 +1,12 @@
 #pragma once
 
+#include <expected>
+#include "error_codes.h"
+
 #include <atomic>
 #include <cstddef>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 
 /**
  * @file
@@ -23,7 +26,7 @@ namespace vnic::memory {
  *
  * @tparam N Block size in bytes returned by `allocate()`.
  *
- * @note Version 0.1.0 is a stub backed by `malloc`/`free`. A pre-allocating,
+ * @note Version 0.1.x is a stub backed by `malloc`/`free`. A pre-allocating,
  *       NUMA-aware pool is planned.
  */
 template <std::size_t N> class Pool final {
@@ -33,6 +36,9 @@ public:
         std::uint32_t blockSize{0}; ///< Block size hint (reserved).
         std::uint32_t capacity{0};  ///< Number of blocks to pre-allocate (reserved).
         std::uint32_t socketId{0};  ///< NUMA socket hint (reserved).
+
+        /// @brief Validate the configuration before it is applied.
+        [[nodiscard]] bool isValid() const noexcept { return capacity > 0; }
     };
 
     Pool() = default;
@@ -56,18 +62,23 @@ public:
     }
 
     /// @brief Apply configuration (currently just stores it).
-    bool configure(const Config& config) {
+    std::expected<void, ErrorCode> configure(const Config& config) {
+        if (!config.isValid()) {
+            return std::unexpected(ErrorCode::ConfigPoolInvalid);
+        }
         config_ = config;
-        return true;
+        return {};
     }
 
-    /// @brief Allocate one block of @p N bytes; `nullptr` on failure.
-    void* allocate() {
+    /// @brief Allocate one block of @p N bytes.
+    /// @return `ErrorCode::MemoryPoolExhausted` if `malloc` fails.
+    std::expected<void*, ErrorCode> allocate() {
         void* ptr = std::malloc(N);
-        if (ptr != nullptr) {
-            live_.fetch_add(1, std::memory_order_relaxed);
-            total_.fetch_add(1, std::memory_order_relaxed);
+        if (ptr == nullptr) [[unlikely]] {
+            return std::unexpected(ErrorCode::MemoryPoolExhausted);
         }
+        live_.fetch_add(1, std::memory_order_relaxed);
+        total_.fetch_add(1, std::memory_order_relaxed);
         return ptr;
     }
 

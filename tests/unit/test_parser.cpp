@@ -1,24 +1,30 @@
 #include <gtest/gtest.h>
 
 #include "parser/parser.h"
+#include "utils/unaligned.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include <arpa/inet.h>
+#include <linux/icmp.h>
 #include <linux/if_ether.h>
+#include <linux/ip.h>
 #include <linux/ipv6.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
 #include <net/if_arp.h>
-#include <netinet/ip.h>
-#include <netinet/ip_icmp.h>
-#include <netinet/tcp.h>
-#include <netinet/udp.h>
+/// TODO: вынести методы создания сырых пакетов в parser.h/.cpp: они пригодятся
+/// и в других местах.
+///
 
 namespace {
 
@@ -128,11 +134,11 @@ std::vector<std::byte> MakeArp() {
 
 const std::byte* Base(const std::vector<std::byte>& frame) { return frame.data(); }
 
-} // namespace
+template <typename T> bool HeaderEq(const std::optional<T>& header, const void* expected) {
+    return header.has_value() && std::memcmp(&*header, expected, sizeof(T)) == 0;
+}
 
-// ---------------------------------------------------------------------------
-// Default (unparsed) state
-// ---------------------------------------------------------------------------
+} // namespace
 
 TEST(ParserTest, DefaultStateIsEmpty) {
     vnic::Parser parser;
@@ -141,13 +147,13 @@ TEST(ParserTest, DefaultStateIsEmpty) {
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::None);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::None);
 
-    EXPECT_EQ(parser.eth(), nullptr);
-    EXPECT_EQ(parser.ipv4(), nullptr);
-    EXPECT_EQ(parser.ipv6(), nullptr);
-    EXPECT_EQ(parser.arp(), nullptr);
-    EXPECT_EQ(parser.icmp(), nullptr);
-    EXPECT_EQ(parser.tcp(), nullptr);
-    EXPECT_EQ(parser.udp(), nullptr);
+    EXPECT_FALSE(parser.eth().has_value());
+    EXPECT_FALSE(parser.ipv4().has_value());
+    EXPECT_FALSE(parser.ipv6().has_value());
+    EXPECT_FALSE(parser.arp().has_value());
+    EXPECT_FALSE(parser.icmp().has_value());
+    EXPECT_FALSE(parser.tcp().has_value());
+    EXPECT_FALSE(parser.udp().has_value());
 
     EXPECT_EQ(parser.vlanId(), 0u);
     EXPECT_EQ(parser.l2Offset(), 0u);
@@ -161,10 +167,10 @@ TEST(ParserTest, ParsesPlainEthernetIpv4) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, IPPROTO_UDP, sizeof(udphdr));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Eth);
-    EXPECT_EQ(parser.eth(), reinterpret_cast<const ethhdr*>(Base(frame)));
+    EXPECT_TRUE(HeaderEq(parser.eth(), Base(frame)));
     EXPECT_EQ(parser.vlanId(), 0u);
     EXPECT_EQ(parser.l2Offset(), sizeof(ethhdr));
 }
@@ -173,10 +179,10 @@ TEST(ParserTest, ParsesVlanTaggedIpv4) {
     vnic::Parser parser;
     auto frame = MakeVlan(ETH_P_8021Q, ETH_P_IP, 0x0ABC, Ipv4Bytes(5, IPPROTO_UDP, sizeof(udphdr)));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Vlan);
-    EXPECT_EQ(parser.eth(), reinterpret_cast<const ethhdr*>(Base(frame)));
+    EXPECT_TRUE(HeaderEq(parser.eth(), Base(frame)));
     EXPECT_EQ(parser.vlanId(), 0x0ABCu);
     EXPECT_EQ(parser.l2Offset(), sizeof(ethhdr) + 4);
 }
@@ -185,7 +191,7 @@ TEST(ParserTest, ParsesVlanTaggedWithQinQ) {
     vnic::Parser parser;
     auto frame = MakeVlan(ETH_P_8021AD, ETH_P_IP, 0x0BCD, Ipv4Bytes(5, IPPROTO_UDP, sizeof(udphdr)));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Vlan);
     EXPECT_EQ(parser.vlanId(), 0x0BCDu);
@@ -193,10 +199,11 @@ TEST(ParserTest, ParsesVlanTaggedWithQinQ) {
 
 TEST(ParserTest, VlanIdIsMaskedToTwelveBits) {
     vnic::Parser parser;
-    // 0xF000 sets the priority and DEI bits; only the low 12 bits are the VLAN ID.
+    // 0xF000 sets the priority and DEI bits; only the low 12 bits are the VLAN
+    // ID.
     auto frame = MakeVlan(ETH_P_8021Q, ETH_P_IP, 0xF123, Ipv4Bytes(5, IPPROTO_UDP, sizeof(udphdr)));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.vlanId(), 0x0123u);
 }
@@ -205,7 +212,7 @@ TEST(ParserTest, ParsesVlanTaggedIpv6) {
     vnic::Parser parser;
     auto frame = MakeVlan(ETH_P_8021Q, ETH_P_IPV6, 100, Ipv6Bytes(IPPROTO_UDP, sizeof(udphdr)));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Vlan);
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Ipv6);
@@ -232,26 +239,26 @@ TEST(ParserTest, ParsesVlanTaggedArp) {
     arp->ar_op  = htons(1);
 
     vnic::Parser parser;
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Vlan);
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Arp);
     EXPECT_EQ(parser.vlanId(), 7u);
-    EXPECT_EQ(parser.arp(), reinterpret_cast<const arphdr*>(frame.data() + sizeof(ethhdr) + 4));
+    EXPECT_TRUE(HeaderEq(parser.arp(), frame.data() + sizeof(ethhdr) + 4));
 }
 
 TEST(ParserTest, UnknownEtherTypeFailsWithUnknownL2) {
     vnic::Parser parser;
     auto frame = MakeEthernet(0x1234, 32);
 
-    EXPECT_FALSE(parser.parse(Bytes(frame)));
+    EXPECT_FALSE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Eth);
-    EXPECT_EQ(parser.eth(), reinterpret_cast<const ethhdr*>(Base(frame)));
+    EXPECT_TRUE(HeaderEq(parser.eth(), Base(frame)));
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Unknown);
-    EXPECT_EQ(parser.ipv4(), nullptr);
-    EXPECT_EQ(parser.ipv6(), nullptr);
-    EXPECT_EQ(parser.arp(), nullptr);
+    EXPECT_FALSE(parser.ipv4().has_value());
+    EXPECT_FALSE(parser.ipv6().has_value());
+    EXPECT_FALSE(parser.arp().has_value());
 }
 
 // ---------------------------------------------------------------------------
@@ -266,68 +273,84 @@ TEST(ParserTest, ParsesIpv4Udp) {
     udp->dest   = htons(5353);
     udp->len    = htons(sizeof(udphdr));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Ipv4);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Udp);
-    EXPECT_EQ(parser.ipv4(), reinterpret_cast<const iphdr*>(frame.data() + sizeof(ethhdr)));
-    ASSERT_NE(parser.udp(), nullptr);
-    EXPECT_EQ(parser.udp(), reinterpret_cast<const udphdr*>(frame.data() + sizeof(ethhdr) + sizeof(iphdr)));
-    EXPECT_EQ(parser.tcp(), nullptr);
-    EXPECT_EQ(parser.icmp(), nullptr);
-    EXPECT_EQ(parser.ipv6(), nullptr);
-    EXPECT_EQ(parser.arp(), nullptr);
+    EXPECT_TRUE(HeaderEq(parser.ipv4(), frame.data() + sizeof(ethhdr)));
+    ASSERT_TRUE(parser.udp().has_value());
+    EXPECT_TRUE(HeaderEq(parser.udp(), frame.data() + sizeof(ethhdr) + sizeof(iphdr)));
+    EXPECT_FALSE(parser.tcp().has_value());
+    EXPECT_FALSE(parser.icmp().has_value());
+    EXPECT_FALSE(parser.ipv6().has_value());
+    EXPECT_FALSE(parser.arp().has_value());
+}
+
+TEST(ParserTest, ParsesFromUnalignedBuffer) {
+    auto frame = MakeIpv4(5, IPPROTO_UDP, sizeof(udphdr));
+    std::vector<std::byte> storage(frame.size() + 1, std::byte{0});
+    std::memcpy(storage.data() + 1, frame.data(), frame.size());
+
+    vnic::Parser parser;
+    ASSERT_TRUE(parser.parse(std::span<const std::byte>{storage.data() + 1, frame.size()}).has_value());
+
+    const auto ip = parser.ipv4();
+    ASSERT_TRUE(ip.has_value());
+    EXPECT_EQ(ntohl(ip->saddr), 0x0A000001u);
+    EXPECT_EQ(ntohl(ip->daddr), 0x0A000002u);
+    ASSERT_TRUE(parser.udp().has_value());
 }
 
 TEST(ParserTest, ParsesIpv4Tcp) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, IPPROTO_TCP, sizeof(tcphdr));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Tcp);
-    EXPECT_EQ(parser.tcp(), reinterpret_cast<const tcphdr*>(frame.data() + sizeof(ethhdr) + sizeof(iphdr)));
-    EXPECT_EQ(parser.udp(), nullptr);
-    EXPECT_EQ(parser.icmp(), nullptr);
+    EXPECT_TRUE(HeaderEq(parser.tcp(), frame.data() + sizeof(ethhdr) + sizeof(iphdr)));
+    EXPECT_FALSE(parser.udp().has_value());
+    EXPECT_FALSE(parser.icmp().has_value());
 }
 
 TEST(ParserTest, ParsesIpv4Icmp) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, IPPROTO_ICMP, sizeof(icmphdr));
-    auto* icmp = reinterpret_cast<icmphdr*>(frame.data() + sizeof(ethhdr) + sizeof(iphdr));
-    icmp->type = ICMP_ECHO;
-    icmp->code = 0;
+    auto icmp  = vnic::utils::LoadUnaligned<icmphdr>(frame.data() + sizeof(ethhdr) + sizeof(iphdr));
+    icmp.type  = ICMP_ECHO;
+    icmp.code  = 0;
+    vnic::utils::StoreUnaligned(frame.data() + sizeof(ethhdr) + sizeof(iphdr), icmp);
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Icmp);
-    ASSERT_NE(parser.icmp(), nullptr);
-    EXPECT_EQ(parser.icmp(), reinterpret_cast<const icmphdr*>(frame.data() + sizeof(ethhdr) + sizeof(iphdr)));
-    EXPECT_EQ(parser.tcp(), nullptr);
-    EXPECT_EQ(parser.udp(), nullptr);
+    ASSERT_TRUE(parser.icmp().has_value());
+    EXPECT_TRUE(HeaderEq(parser.icmp(), frame.data() + sizeof(ethhdr) + sizeof(iphdr)));
+    EXPECT_FALSE(parser.tcp().has_value());
+    EXPECT_FALSE(parser.udp().has_value());
 }
 
 TEST(ParserTest, IpV4UnknownL4ProtocolIsReportedAsUnknown) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, 99, 16); // 99 is not TCP/UDP/ICMP
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Ipv4);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Unknown);
-    EXPECT_EQ(parser.tcp(), nullptr);
-    EXPECT_EQ(parser.udp(), nullptr);
-    EXPECT_EQ(parser.icmp(), nullptr);
+    EXPECT_FALSE(parser.tcp().has_value());
+    EXPECT_FALSE(parser.udp().has_value());
+    EXPECT_FALSE(parser.icmp().has_value());
 }
 
 TEST(ParserTest, Ipv4OptionsAreSkippedUsingIhl) {
     vnic::Parser parser;
     auto frame = MakeIpv4(6, IPPROTO_UDP, sizeof(udphdr)); // 24-byte IP header
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Udp);
-    EXPECT_EQ(parser.udp(), reinterpret_cast<const udphdr*>(frame.data() + sizeof(ethhdr) + 24));
+    EXPECT_TRUE(HeaderEq(parser.udp(), frame.data() + sizeof(ethhdr) + 24));
 }
 
 // ---------------------------------------------------------------------------
@@ -338,47 +361,47 @@ TEST(ParserTest, ParsesIpv6Udp) {
     vnic::Parser parser;
     auto frame = MakeIpv6(IPPROTO_UDP, sizeof(udphdr));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Ipv6);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Udp);
-    EXPECT_EQ(parser.ipv6(), reinterpret_cast<const ipv6hdr*>(frame.data() + sizeof(ethhdr)));
-    EXPECT_EQ(parser.udp(), reinterpret_cast<const udphdr*>(frame.data() + sizeof(ethhdr) + sizeof(ipv6hdr)));
-    EXPECT_EQ(parser.ipv4(), nullptr);
-    EXPECT_EQ(parser.arp(), nullptr);
+    EXPECT_TRUE(HeaderEq(parser.ipv6(), frame.data() + sizeof(ethhdr)));
+    EXPECT_TRUE(HeaderEq(parser.udp(), frame.data() + sizeof(ethhdr) + sizeof(ipv6hdr)));
+    EXPECT_FALSE(parser.ipv4().has_value());
+    EXPECT_FALSE(parser.arp().has_value());
 }
 
 TEST(ParserTest, ParsesIpv6Tcp) {
     vnic::Parser parser;
     auto frame = MakeIpv6(IPPROTO_TCP, sizeof(tcphdr));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Tcp);
-    EXPECT_EQ(parser.tcp(), reinterpret_cast<const tcphdr*>(frame.data() + sizeof(ethhdr) + sizeof(ipv6hdr)));
+    EXPECT_TRUE(HeaderEq(parser.tcp(), frame.data() + sizeof(ethhdr) + sizeof(ipv6hdr)));
 }
 
 TEST(ParserTest, ParsesIpv6Icmp) {
     vnic::Parser parser;
     auto frame = MakeIpv6(IPPROTO_ICMPV6, sizeof(icmphdr));
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Icmp);
-    ASSERT_NE(parser.icmp(), nullptr);
+    ASSERT_TRUE(parser.icmp().has_value());
 }
 
 TEST(ParserTest, Ipv6UnknownNextHeaderIsReportedAsUnknown) {
     vnic::Parser parser;
     auto frame = MakeIpv6(99, 16);
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Ipv6);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Unknown);
-    EXPECT_EQ(parser.tcp(), nullptr);
-    EXPECT_EQ(parser.udp(), nullptr);
-    EXPECT_EQ(parser.icmp(), nullptr);
+    EXPECT_FALSE(parser.tcp().has_value());
+    EXPECT_FALSE(parser.udp().has_value());
+    EXPECT_FALSE(parser.icmp().has_value());
 }
 
 // ---------------------------------------------------------------------------
@@ -389,13 +412,13 @@ TEST(ParserTest, ParsesArp) {
     vnic::Parser parser;
     auto frame = MakeArp();
 
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Eth);
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Arp);
-    EXPECT_EQ(parser.arp(), reinterpret_cast<const arphdr*>(frame.data() + sizeof(ethhdr)));
-    EXPECT_EQ(parser.ipv4(), nullptr);
-    EXPECT_EQ(parser.ipv6(), nullptr);
+    EXPECT_TRUE(HeaderEq(parser.arp(), frame.data() + sizeof(ethhdr)));
+    EXPECT_FALSE(parser.ipv4().has_value());
+    EXPECT_FALSE(parser.ipv6().has_value());
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::None);
 }
 
@@ -407,10 +430,10 @@ TEST(ParserTest, EmptyBufferFailsWithoutStateChange) {
     vnic::Parser parser;
     std::vector<std::byte> empty;
 
-    EXPECT_FALSE(parser.parse(Bytes(empty)));
+    EXPECT_FALSE(parser.parse(Bytes(empty)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::None);
-    EXPECT_EQ(parser.eth(), nullptr);
+    EXPECT_FALSE(parser.eth().has_value());
     EXPECT_EQ(parser.l2Offset(), 0u);
 }
 
@@ -418,10 +441,10 @@ TEST(ParserTest, TruncatedEthernetHeaderFails) {
     vnic::Parser parser;
     auto frame = MakeEthernet(ETH_P_IP, 64);
 
-    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) - 1)));
+    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) - 1)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::None);
-    EXPECT_EQ(parser.eth(), nullptr);
+    EXPECT_FALSE(parser.eth().has_value());
 }
 
 TEST(ParserTest, TruncatedVlanTagFails) {
@@ -429,7 +452,7 @@ TEST(ParserTest, TruncatedVlanTagFails) {
     auto frame = MakeVlan(ETH_P_8021Q, ETH_P_IP, 5, Ipv4Bytes(5, IPPROTO_UDP, sizeof(udphdr)));
 
     // Only 3 of the 4 required VLAN bytes are present.
-    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) + 3)));
+    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) + 3)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Eth);
     EXPECT_EQ(parser.vlanId(), 0u);
@@ -439,20 +462,21 @@ TEST(ParserTest, TruncatedIpv4HeaderFails) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, IPPROTO_UDP, sizeof(udphdr));
 
-    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) + sizeof(iphdr) - 1)));
+    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) + sizeof(iphdr) - 1)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Eth);
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::None);
-    EXPECT_EQ(parser.ipv4(), nullptr);
+    EXPECT_FALSE(parser.ipv4().has_value());
 }
 
 TEST(ParserTest, Ipv4WithBadVersionFails) {
     vnic::Parser parser;
-    auto frame  = MakeIpv4(5, IPPROTO_UDP, sizeof(udphdr));
-    auto* ip    = reinterpret_cast<iphdr*>(frame.data() + sizeof(ethhdr));
-    ip->version = 6;
+    auto frame = MakeIpv4(5, IPPROTO_UDP, sizeof(udphdr));
+    auto ip    = vnic::utils::LoadUnaligned<iphdr>(frame.data() + sizeof(ethhdr));
+    ip.version = 6;
+    vnic::utils::StoreUnaligned(frame.data() + sizeof(ethhdr), ip);
 
-    EXPECT_FALSE(parser.parse(Bytes(frame)));
+    EXPECT_FALSE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::None);
 }
@@ -461,7 +485,7 @@ TEST(ParserTest, Ipv4WithTooSmallIhlFailsAfterL2IsSet) {
     vnic::Parser parser;
     auto frame = MakeIpv4(4, IPPROTO_UDP, sizeof(udphdr)); // ihl*4 = 16 < 20
 
-    EXPECT_FALSE(parser.parse(Bytes(frame)));
+    EXPECT_FALSE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Ipv4);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::None);
@@ -471,30 +495,31 @@ TEST(ParserTest, TruncatedIpv4L4HeaderFails) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, IPPROTO_TCP, sizeof(tcphdr) - 1);
 
-    EXPECT_FALSE(parser.parse(Bytes(frame)));
+    EXPECT_FALSE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Ipv4);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::None);
-    EXPECT_EQ(parser.tcp(), nullptr);
+    EXPECT_FALSE(parser.tcp().has_value());
 }
 
 TEST(ParserTest, TruncatedIpv6HeaderFails) {
     vnic::Parser parser;
     auto frame = MakeIpv6(IPPROTO_UDP, sizeof(udphdr));
 
-    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) + sizeof(ipv6hdr) - 1)));
+    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) + sizeof(ipv6hdr) - 1)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::None);
-    EXPECT_EQ(parser.ipv6(), nullptr);
+    EXPECT_FALSE(parser.ipv6().has_value());
 }
 
 TEST(ParserTest, Ipv6WithBadVersionFails) {
     vnic::Parser parser;
-    auto frame   = MakeIpv6(IPPROTO_UDP, sizeof(udphdr));
-    auto* ip6    = reinterpret_cast<ipv6hdr*>(frame.data() + sizeof(ethhdr));
-    ip6->version = 4;
+    auto frame  = MakeIpv6(IPPROTO_UDP, sizeof(udphdr));
+    auto ip6    = vnic::utils::LoadUnaligned<ipv6hdr>(frame.data() + sizeof(ethhdr));
+    ip6.version = 4;
+    vnic::utils::StoreUnaligned(frame.data() + sizeof(ethhdr), ip6);
 
-    EXPECT_FALSE(parser.parse(Bytes(frame)));
+    EXPECT_FALSE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::None);
 }
@@ -503,21 +528,21 @@ TEST(ParserTest, TruncatedIpv6L4HeaderFails) {
     vnic::Parser parser;
     auto frame = MakeIpv6(IPPROTO_UDP, sizeof(udphdr) - 1);
 
-    EXPECT_FALSE(parser.parse(Bytes(frame)));
+    EXPECT_FALSE(parser.parse(Bytes(frame)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Ipv6);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::None);
-    EXPECT_EQ(parser.udp(), nullptr);
+    EXPECT_FALSE(parser.udp().has_value());
 }
 
 TEST(ParserTest, TruncatedArpHeaderFails) {
     vnic::Parser parser;
     auto frame = MakeArp();
 
-    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) + sizeof(arphdr) - 1)));
+    EXPECT_FALSE(parser.parse(Head(frame, sizeof(ethhdr) + sizeof(arphdr) - 1)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::None);
-    EXPECT_EQ(parser.arp(), nullptr);
+    EXPECT_FALSE(parser.arp().has_value());
 }
 
 // ---------------------------------------------------------------------------
@@ -529,8 +554,8 @@ TEST(ParserTest, ReportsFailureOnSecondParseAfterSuccess) {
     auto good = MakeIpv4(5, IPPROTO_UDP, sizeof(udphdr));
     auto bad  = MakeEthernet(0x1234, 16);
 
-    ASSERT_TRUE(parser.parse(Bytes(good)));
-    EXPECT_FALSE(parser.parse(Bytes(bad)));
+    ASSERT_TRUE(parser.parse(Bytes(good)).has_value());
+    EXPECT_FALSE(parser.parse(Bytes(bad)).has_value());
 
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Unknown);
 }
@@ -540,34 +565,35 @@ TEST(ParserTest, ParseResetsStateFromPreviousFrame) {
     auto setter = MakeIpv4(5, IPPROTO_TCP, sizeof(tcphdr)); // L2=Ipv4, L3=Tcp
     auto arp    = MakeArp();                                // L2=Arp, no L3
 
-    ASSERT_TRUE(parser.parse(Bytes(setter)));
+    ASSERT_TRUE(parser.parse(Bytes(setter)).has_value());
     ASSERT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::Tcp);
 
-    ASSERT_TRUE(parser.parse(Bytes(arp)));
+    ASSERT_TRUE(parser.parse(Bytes(arp)).has_value());
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::Eth);
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Arp);
-    EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::None); // no stale TCP
-    EXPECT_EQ(parser.tcp(), nullptr);
-    EXPECT_EQ(parser.udp(), nullptr);
-    EXPECT_EQ(parser.icmp(), nullptr);
-    EXPECT_EQ(parser.ipv4(), nullptr);
+    EXPECT_EQ(parser.l3Protocol(),
+              vnic::Parser::L3Protocol::None); // no stale TCP
+    EXPECT_FALSE(parser.tcp().has_value());
+    EXPECT_FALSE(parser.udp().has_value());
+    EXPECT_FALSE(parser.icmp().has_value());
+    EXPECT_FALSE(parser.ipv4().has_value());
 }
 
 TEST(ParserTest, ResetClearsStateAfterSuccessfulParse) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, IPPROTO_UDP, sizeof(udphdr));
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     parser.reset();
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::None);
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::None);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::None);
-    EXPECT_EQ(parser.eth(), nullptr);
-    EXPECT_EQ(parser.ipv4(), nullptr);
-    EXPECT_EQ(parser.arp(), nullptr);
-    EXPECT_EQ(parser.udp(), nullptr);
+    EXPECT_FALSE(parser.eth().has_value());
+    EXPECT_FALSE(parser.ipv4().has_value());
+    EXPECT_FALSE(parser.arp().has_value());
+    EXPECT_FALSE(parser.udp().has_value());
     EXPECT_EQ(parser.vlanId(), 0u);
     EXPECT_EQ(parser.l2Offset(), 0u);
 }
@@ -576,14 +602,14 @@ TEST(ParserTest, ResetClearsStateAfterFailedParse) {
     vnic::Parser parser;
     auto bad = MakeEthernet(0x1234, 16); // unsupported EtherType
 
-    ASSERT_FALSE(parser.parse(Bytes(bad)));
+    ASSERT_FALSE(parser.parse(Bytes(bad)).has_value());
     ASSERT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::Unknown);
 
     parser.reset();
 
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::None);
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::None);
-    EXPECT_EQ(parser.eth(), nullptr);
+    EXPECT_FALSE(parser.eth().has_value());
 }
 
 TEST(ParserTest, ResetOnFreshParserIsNoOp) {
@@ -594,7 +620,7 @@ TEST(ParserTest, ResetOnFreshParserIsNoOp) {
     EXPECT_EQ(parser.l1Protocol(), vnic::Parser::L1Protocol::None);
     EXPECT_EQ(parser.l2Protocol(), vnic::Parser::L2Protocol::None);
     EXPECT_EQ(parser.l3Protocol(), vnic::Parser::L3Protocol::None);
-    EXPECT_EQ(parser.eth(), nullptr);
+    EXPECT_FALSE(parser.eth().has_value());
     EXPECT_EQ(parser.l2Offset(), 0u);
 }
 
@@ -605,7 +631,7 @@ TEST(ParserTest, ResetOnFreshParserIsNoOp) {
 TEST(ParserTest, StreamOperatorPrintsIpv4Tcp) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, IPPROTO_TCP, sizeof(tcphdr));
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     std::ostringstream os;
     os << parser;
@@ -622,7 +648,7 @@ TEST(ParserTest, StreamOperatorPrintsIpv4Tcp) {
 TEST(ParserTest, StreamOperatorPrintsArp) {
     vnic::Parser parser;
     auto frame = MakeArp();
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     std::ostringstream os;
     os << parser;
@@ -636,7 +662,7 @@ TEST(ParserTest, StreamOperatorPrintsArp) {
 TEST(ParserTest, StreamOperatorPrintsVlanAndIpv6) {
     vnic::Parser parser;
     auto frame = MakeVlan(ETH_P_8021Q, ETH_P_IPV6, 42, Ipv6Bytes(IPPROTO_UDP, sizeof(udphdr)));
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     std::ostringstream os;
     os << parser;
@@ -649,7 +675,7 @@ TEST(ParserTest, StreamOperatorPrintsVlanAndIpv6) {
 TEST(ParserTest, StreamOperatorPrintsUdp) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, IPPROTO_UDP, sizeof(udphdr));
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     std::ostringstream os;
     os << parser;
@@ -662,9 +688,10 @@ TEST(ParserTest, StreamOperatorPrintsUdp) {
 TEST(ParserTest, StreamOperatorPrintsIcmp) {
     vnic::Parser parser;
     auto frame = MakeIpv4(5, IPPROTO_ICMP, sizeof(icmphdr));
-    auto* icmp = reinterpret_cast<icmphdr*>(frame.data() + sizeof(ethhdr) + sizeof(iphdr));
-    icmp->type = ICMP_ECHO;
-    ASSERT_TRUE(parser.parse(Bytes(frame)));
+    auto icmp  = vnic::utils::LoadUnaligned<icmphdr>(frame.data() + sizeof(ethhdr) + sizeof(iphdr));
+    icmp.type  = ICMP_ECHO;
+    vnic::utils::StoreUnaligned(frame.data() + sizeof(ethhdr) + sizeof(iphdr), icmp);
+    ASSERT_TRUE(parser.parse(Bytes(frame)).has_value());
 
     std::ostringstream os;
     os << parser;
@@ -672,4 +699,73 @@ TEST(ParserTest, StreamOperatorPrintsIcmp) {
 
     EXPECT_NE(text.find("[L3] ICMP"), std::string::npos);
     EXPECT_NE(text.find("echo-request"), std::string::npos);
+}
+
+// ===========================================================================
+// Text helpers
+// ===========================================================================
+
+TEST(ParserTextTest, MacToStringFormatsSixBytes) {
+    EXPECT_EQ(vnic::MacToString(kSrcMac), "00:11:22:33:44:55");
+    EXPECT_EQ(vnic::MacToString(kDstMac), "66:77:88:99:aa:bb");
+
+    constexpr std::array<std::uint8_t, 6> zeroMac{};
+    EXPECT_EQ(vnic::MacToString(zeroMac), "00:00:00:00:00:00");
+}
+
+TEST(ParserTextTest, Ipv4ToStringUsesNetworkByteOrder) {
+    EXPECT_EQ(vnic::Ipv4ToString(htonl(0xC0A80101u)), "192.168.1.1");
+    EXPECT_EQ(vnic::Ipv4ToString(htonl(0x0A000001u)), "10.0.0.1");
+    EXPECT_EQ(vnic::Ipv4ToString(0u), "0.0.0.0");
+}
+
+TEST(ParserTextTest, Ipv6ToStringUsesCompressedNotation) {
+    const std::array<std::uint8_t, 16> address{0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+                                               0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    EXPECT_EQ(vnic::Ipv6ToString(address), "2001:db8::1");
+
+    constexpr std::array<std::uint8_t, 16> loopback{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    EXPECT_EQ(vnic::Ipv6ToString(loopback), "::1");
+
+    constexpr std::array<std::uint8_t, 16> unspecified{};
+    EXPECT_EQ(vnic::Ipv6ToString(unspecified), "::");
+}
+
+TEST(ParserTextTest, ProtocolNamesCoverAllValues) {
+    EXPECT_EQ(vnic::L1Name(vnic::Parser::L1Protocol::None), "None");
+    EXPECT_EQ(vnic::L1Name(vnic::Parser::L1Protocol::Eth), "Eth");
+    EXPECT_EQ(vnic::L1Name(vnic::Parser::L1Protocol::Vlan), "Vlan");
+    EXPECT_EQ(vnic::L1Name(vnic::Parser::L1Protocol::Unknown), "Unknown");
+    EXPECT_EQ(vnic::L1Name(static_cast<vnic::Parser::L1Protocol>(0xFF)), "Unknown");
+
+    EXPECT_EQ(vnic::L2Name(vnic::Parser::L2Protocol::None), "None");
+    EXPECT_EQ(vnic::L2Name(vnic::Parser::L2Protocol::Ipv4), "IPv4");
+    EXPECT_EQ(vnic::L2Name(vnic::Parser::L2Protocol::Ipv6), "IPv6");
+    EXPECT_EQ(vnic::L2Name(vnic::Parser::L2Protocol::Arp), "ARP");
+    EXPECT_EQ(vnic::L2Name(vnic::Parser::L2Protocol::Unknown), "Unknown");
+    EXPECT_EQ(vnic::L2Name(static_cast<vnic::Parser::L2Protocol>(0xFF)), "Unknown");
+
+    EXPECT_EQ(vnic::L3Name(vnic::Parser::L3Protocol::None), "None");
+    EXPECT_EQ(vnic::L3Name(vnic::Parser::L3Protocol::Icmp), "ICMP");
+    EXPECT_EQ(vnic::L3Name(vnic::Parser::L3Protocol::Tcp), "TCP");
+    EXPECT_EQ(vnic::L3Name(vnic::Parser::L3Protocol::Udp), "UDP");
+    EXPECT_EQ(vnic::L3Name(vnic::Parser::L3Protocol::Unknown), "Unknown");
+    EXPECT_EQ(vnic::L3Name(static_cast<vnic::Parser::L3Protocol>(0xFF)), "Unknown");
+}
+
+TEST(ParserTextTest, ArpOpNameUsesNetworkByteOrder) {
+    EXPECT_EQ(vnic::ArpOpName(htons(1)), "request");
+    EXPECT_EQ(vnic::ArpOpName(htons(2)), "reply");
+    EXPECT_EQ(vnic::ArpOpName(htons(3)), "RARP-request");
+    EXPECT_EQ(vnic::ArpOpName(htons(4)), "RARP-reply");
+    EXPECT_EQ(vnic::ArpOpName(htons(99)), "?");
+}
+
+TEST(ParserTextTest, IcmpTypeNameCoversCommonTypes) {
+    EXPECT_EQ(vnic::IcmpTypeName(ICMP_ECHOREPLY), "echo-reply");
+    EXPECT_EQ(vnic::IcmpTypeName(ICMP_ECHO), "echo-request");
+    EXPECT_EQ(vnic::IcmpTypeName(ICMP_DEST_UNREACH), "dest-unreachable");
+    EXPECT_EQ(vnic::IcmpTypeName(ICMP_TIME_EXCEEDED), "time-exceeded");
+    EXPECT_EQ(vnic::IcmpTypeName(ICMP_REDIRECT), "redirect");
+    EXPECT_EQ(vnic::IcmpTypeName(static_cast<std::uint8_t>(200)), "?");
 }

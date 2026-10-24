@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 
-#include "queue/tx_queue.h"
+#include "constants.h"
 #include "link/link.h"
-#include "constanst.h"
 #include "packet/packet_buffer.h"
 #include "packet/packet_descriptor.h"
+#include "queue/tx_queue.h"
 
 #include <chrono>
 #include <cstddef>
@@ -40,8 +40,8 @@ std::vector<std::byte> Payload(std::size_t size, std::byte fill) { return std::v
 vnic::TxQueue MakeStartedQueue(vnic::Link& link) {
     vnic::TxQueue queue;
     vnic::TxQueue::Config config;
-    EXPECT_TRUE(queue.configure(config, link));
-    EXPECT_TRUE(queue.start());
+    EXPECT_TRUE(queue.configure(config, link).has_value());
+    EXPECT_TRUE(queue.start().has_value());
     return queue;
 }
 
@@ -55,7 +55,7 @@ vnic::PacketDescriptor MakeDesc(vnic::PacketBuffer* buffer, std::uint32_t totalL
 // Reads one frame out of the link's TX pipe.
 std::vector<std::byte> DrainTx(vnic::Link& link) {
     std::vector<std::byte> out;
-    link.takeTx(out, 50ms);
+    (void)link.takeTx(out, 50ms);
     return out;
 }
 
@@ -65,20 +65,13 @@ std::vector<std::byte> DrainTx(vnic::Link& link) {
 // Lifecycle / configuration
 // ---------------------------------------------------------------------------
 
-TEST(TxQueueTest, GetLinkIsNullBeforeConfigure) {
-    vnic::TxQueue queue;
-
-    EXPECT_EQ(queue.getLink(), nullptr);
-}
-
 TEST(TxQueueTest, ConfigureStoresLinkAndLeavesStatsZero) {
     vnic::Link link;
     vnic::TxQueue queue;
     vnic::TxQueue::Config config;
 
-    ASSERT_TRUE(queue.configure(config, link));
+    ASSERT_TRUE(queue.configure(config, link).has_value());
 
-    EXPECT_EQ(queue.getLink(), &link);
     EXPECT_EQ(queue.getStats().loadProcessedPackets(), 0u);
     EXPECT_EQ(queue.getStats().loadDroppedPackets(), 0u);
 }
@@ -88,34 +81,32 @@ TEST(TxQueueTest, ConfigureCanBeRepeatedWithAnotherLink) {
     vnic::Link second;
     vnic::TxQueue queue;
     vnic::TxQueue::Config config;
-    ASSERT_TRUE(queue.configure(config, first));
+    ASSERT_TRUE(queue.configure(config, first).has_value());
 
-    ASSERT_TRUE(queue.configure(config, second));
-
-    EXPECT_EQ(queue.getLink(), &second);
+    ASSERT_TRUE(queue.configure(config, second).has_value());
 }
 
 TEST(TxQueueTest, StartWithoutConfigureFails) {
     vnic::TxQueue queue;
 
-    EXPECT_FALSE(queue.start());
+    EXPECT_FALSE(queue.start().has_value());
 }
 
 TEST(TxQueueTest, StopWithoutStartFails) {
     vnic::TxQueue queue;
 
-    EXPECT_FALSE(queue.stop());
+    EXPECT_FALSE(queue.stop().has_value());
 }
 
 TEST(TxQueueTest, StartAndStopSucceed) {
     vnic::Link link;
     vnic::TxQueue queue;
     vnic::TxQueue::Config config;
-    ASSERT_TRUE(queue.configure(config, link));
+    ASSERT_TRUE(queue.configure(config, link).has_value());
 
-    EXPECT_TRUE(queue.start());
+    EXPECT_TRUE(queue.start().has_value());
     EXPECT_EQ(queue.getState(), vnic::TxQueue::State::Started);
-    EXPECT_TRUE(queue.stop());
+    EXPECT_TRUE(queue.stop().has_value());
     EXPECT_EQ(queue.getState(), vnic::TxQueue::State::Stopped);
 }
 
@@ -128,7 +119,7 @@ TEST(TxQueueTest, PutSingleSegmentReachesLink) {
     vnic::TxQueue queue = MakeStartedQueue(link);
 
     Segment segment = MakeSegment(64, kFill);
-    EXPECT_TRUE(queue.put(MakeDesc(segment.buf, 64)));
+    EXPECT_TRUE(queue.put(MakeDesc(segment.buf, 64)).has_value());
 
     const auto out = DrainTx(link);
     EXPECT_EQ(out, Payload(64, kFill));
@@ -144,7 +135,7 @@ TEST(TxQueueTest, PutMultiSegmentConcatenatesInOrder) {
     Segment second  = MakeSegment(100, std::byte{0xBB});
     first.buf->next = second.buf;
 
-    EXPECT_TRUE(queue.put(MakeDesc(first.buf, 2148)));
+    EXPECT_TRUE(queue.put(MakeDesc(first.buf, 2148)).has_value());
 
     std::vector<std::byte> expected = Payload(2048, std::byte{0xAA});
     const auto tail                 = Payload(100, std::byte{0xBB});
@@ -160,7 +151,7 @@ TEST(TxQueueTest, PutCopiesDataFromSourceChain) {
     vnic::TxQueue queue = MakeStartedQueue(link);
 
     Segment segment = MakeSegment(16, std::byte{0x01});
-    EXPECT_TRUE(queue.put(MakeDesc(segment.buf, 16)));
+    EXPECT_TRUE(queue.put(MakeDesc(segment.buf, 16)).has_value());
 
     // Corrupt the source segment after the call; the link must hold a copy.
     std::memset(segment.raw.data() + sizeof(vnic::PacketBuffer), 0xFF, 16);
@@ -175,7 +166,7 @@ TEST(TxQueueTest, StatsAccumulateOverMultiplePuts) {
 
     for (int i = 0; i < 5; ++i) {
         Segment segment = MakeSegment(32, kFill);
-        ASSERT_TRUE(queue.put(MakeDesc(segment.buf, 32)));
+        ASSERT_TRUE(queue.put(MakeDesc(segment.buf, 32)).has_value());
     }
 
     EXPECT_EQ(queue.getStats().loadProcessedPackets(), 5u);
@@ -194,7 +185,7 @@ TEST(TxQueueTest, PutNullBufferDropsPacket) {
     vnic::Link link;
     vnic::TxQueue queue = MakeStartedQueue(link);
 
-    EXPECT_FALSE(queue.put(MakeDesc(nullptr, 0)));
+    EXPECT_FALSE(queue.put(MakeDesc(nullptr, 0)).has_value());
 
     EXPECT_EQ(queue.getStats().loadDroppedPackets(), 1u);
     EXPECT_EQ(queue.getStats().loadDroppedBytes(), 0u);
@@ -206,7 +197,7 @@ TEST(TxQueueTest, PutWithoutConfigureDropsPacket) {
     vnic::TxQueue queue; // never configured: link_ == nullptr
 
     Segment segment = MakeSegment(64, kFill);
-    EXPECT_FALSE(queue.put(MakeDesc(segment.buf, 64)));
+    EXPECT_FALSE(queue.put(MakeDesc(segment.buf, 64)).has_value());
 
     EXPECT_EQ(queue.getStats().loadDroppedPackets(), 1u);
     EXPECT_EQ(queue.getStats().loadDroppedBytes(), 64u);
@@ -218,21 +209,21 @@ TEST(TxQueueTest, PutZeroLengthPacketIsDroppedByLink) {
     vnic::TxQueue queue = MakeStartedQueue(link);
 
     Segment segment = MakeSegment(0, kFill);
-    EXPECT_FALSE(queue.put(MakeDesc(segment.buf, 0)));
+    EXPECT_FALSE(queue.put(MakeDesc(segment.buf, 0)).has_value());
 
     EXPECT_EQ(queue.getStats().loadDroppedPackets(), 1u);
     EXPECT_EQ(queue.getStats().loadProcessedPackets(), 0u);
 }
 
 // ---------------------------------------------------------------------------
-// put: chain length around MAX_SEGMENTS
+// put: chain length around kMaxSegments
 // ---------------------------------------------------------------------------
 
 TEST(TxQueueTest, PutChainAtMaxSegmentsSucceeds) {
     vnic::Link link;
     vnic::TxQueue queue = MakeStartedQueue(link);
 
-    const std::size_t count = static_cast<std::size_t>(vnic::MAX_SEGMENTS);
+    const std::size_t count = static_cast<std::size_t>(vnic::kMaxSegments);
     std::vector<Segment> segments(count);
     for (auto& segment : segments) {
         segment = MakeSegment(1, std::byte{0x5A});
@@ -241,7 +232,7 @@ TEST(TxQueueTest, PutChainAtMaxSegmentsSucceeds) {
         segments[i].buf->next = segments[i + 1].buf;
     }
 
-    EXPECT_TRUE(queue.put(MakeDesc(segments.front().buf, static_cast<std::uint32_t>(count))));
+    EXPECT_TRUE(queue.put(MakeDesc(segments.front().buf, static_cast<std::uint32_t>(count))).has_value());
 
     const auto out = DrainTx(link);
     EXPECT_EQ(out.size(), count);
@@ -252,7 +243,7 @@ TEST(TxQueueTest, PutChainExceedingMaxSegmentsIsDropped) {
     vnic::Link link;
     vnic::TxQueue queue = MakeStartedQueue(link);
 
-    const std::size_t count = static_cast<std::size_t>(vnic::MAX_SEGMENTS) + 1;
+    const std::size_t count = static_cast<std::size_t>(vnic::kMaxSegments) + 1;
     std::vector<Segment> segments(count);
     for (auto& segment : segments) {
         segment = MakeSegment(1, std::byte{0x5A});
@@ -261,10 +252,51 @@ TEST(TxQueueTest, PutChainExceedingMaxSegmentsIsDropped) {
         segments[i].buf->next = segments[i + 1].buf;
     }
 
-    EXPECT_FALSE(queue.put(MakeDesc(segments.front().buf, static_cast<std::uint32_t>(count))));
+    EXPECT_FALSE(queue.put(MakeDesc(segments.front().buf, static_cast<std::uint32_t>(count))).has_value());
 
     EXPECT_EQ(queue.getStats().loadDroppedPackets(), 1u);
     EXPECT_EQ(queue.getStats().loadDroppedBytes(), static_cast<std::uint64_t>(count));
     EXPECT_EQ(queue.getStats().loadProcessedPackets(), 0u);
     EXPECT_TRUE(DrainTx(link).empty());
+}
+
+// ---------------------------------------------------------------------------
+// stats
+// ---------------------------------------------------------------------------
+
+TEST(TxQueueTest, StatsDoNotTouchErrorsOverflowsOrPortCounters) {
+    vnic::Link link;
+    vnic::TxQueue queue = MakeStartedQueue(link);
+
+    Segment segment = MakeSegment(64, kFill);
+    ASSERT_TRUE(queue.put(MakeDesc(segment.buf, 64)).has_value());
+    EXPECT_EQ(queue.getStats().loadProcessedPackets(), 1u);
+    EXPECT_EQ(queue.getStats().loadProcessedBytes(), 64u);
+    EXPECT_EQ(DrainTx(link), Payload(64, kFill));
+
+    EXPECT_EQ(queue.getStats().loadDroppedPackets(), 0u);
+    EXPECT_EQ(queue.getStats().loadDroppedBytes(), 0u);
+    EXPECT_EQ(queue.getStats().loadErrors(), 0u);
+    EXPECT_EQ(queue.getStats().loadOverflows(), 0u);
+    EXPECT_EQ(queue.getStats().loadTransmittedPackets(), 0u);
+    EXPECT_EQ(queue.getStats().loadTransmittedBytes(), 0u);
+    EXPECT_EQ(queue.getStats().loadTxDroppedPackets(), 0u);
+    EXPECT_EQ(queue.getStats().loadTxDroppedBytes(), 0u);
+}
+
+TEST(TxQueueTest, DroppedStatsAccumulateAcrossFailuresWithoutErrors) {
+    vnic::Link link;
+    vnic::TxQueue queue = MakeStartedQueue(link);
+
+    EXPECT_FALSE(queue.put(MakeDesc(nullptr, 10)).has_value());
+    EXPECT_FALSE(queue.put(MakeDesc(nullptr, 20)).has_value());
+
+    EXPECT_EQ(queue.getStats().loadDroppedPackets(), 2u);
+    EXPECT_EQ(queue.getStats().loadDroppedBytes(), 30u);
+    EXPECT_EQ(queue.getStats().loadProcessedPackets(), 0u);
+    EXPECT_EQ(queue.getStats().loadProcessedBytes(), 0u);
+    EXPECT_EQ(queue.getStats().loadErrors(), 0u);
+    EXPECT_EQ(queue.getStats().loadOverflows(), 0u);
+    EXPECT_EQ(queue.getStats().loadTransmittedPackets(), 0u);
+    EXPECT_EQ(queue.getStats().loadTxDroppedPackets(), 0u);
 }

@@ -1,8 +1,8 @@
 #include "rss/hash.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
-#include <algorithm>
 
 #include <netinet/in.h>
 
@@ -10,8 +10,9 @@ namespace vnic::rss::soft {
 
 namespace {
 
-constexpr std::size_t kMaxHashInputBytes{16 + 16 + 2 + 2 + 1}; // IPv6: src + dst + ports + proto
+constexpr std::size_t kMaxHashInputBytes{16 + 16 + 2 + 2}; // IPv6: src + dst + ports
 constexpr std::size_t kMinKeyBytes{40};
+constexpr std::size_t kToeplitzKeyBytes{40};
 
 bool HasIp(Protocol protocol) {
     const auto p{static_cast<std::uint32_t>(protocol)};
@@ -25,7 +26,7 @@ bool HasL4(Protocol protocol) {
 }
 
 // Собирает вход RSS в непрерывный буфер: адреса (4 или 16 байт на адрес),
-// затем порты и байт протокола (если выбран L4). Возвращает длину.
+// затем порты (если выбран L4). Протокол в вход RSS не входит.
 std::size_t BuildHashInput(const FiveTuple& tuple, Protocol protocol,
                            std::array<std::uint8_t, kMaxHashInputBytes>& out) {
     if (!HasIp(protocol)) {
@@ -50,7 +51,6 @@ std::size_t BuildHashInput(const FiveTuple& tuple, Protocol protocol,
         offset += sizeof(__be16);
         std::memcpy(out.data() + offset, &tuple.dport, sizeof(__be16));
         offset += sizeof(__be16);
-        out[offset++] = tuple.iproto;
     }
 
     return offset;
@@ -59,23 +59,29 @@ std::size_t BuildHashInput(const FiveTuple& tuple, Protocol protocol,
 // ============================================================
 //  TOEPLITZ (320-bit key, 10 x 32-bit words)
 // ============================================================
-// Ключ читается через memcpy: key может быть не выровнен под uint32.
-std::uint32_t key320_hash_calc(const std::uint8_t* key, std::uint32_t hash, const std::uint8_t* data, int bits) {
-    std::size_t keyOffset = 0;
+// Реализация Microsoft/Toeplitz: 40-байтный ключ рассматривается как
+// 320-битное скользящее окно. Для каждого единичного бита входа XOR-ится
+// левые 32 бита текущего окна, затем ключ сдвигается на один бит.
+std::uint32_t key320_hash_calc(const std::uint8_t* key, const std::uint8_t* data, std::size_t len) {
+    std::uint64_t prefix{0};
+    for (std::size_t i = 0; i < 8; ++i) {
+        prefix = (prefix << 8) | key[i];
+    }
 
-    for (int i = 0; i < bits; ++i) {
-        const bool bit = (data[i >> 3] >> (7 - (i & 7))) & 1;
+    std::uint32_t hash{0};
+    std::size_t keyIndex{8};
 
-        if (bit) {
-            std::uint32_t word;
-            std::memcpy(&word, key + keyOffset, sizeof(word));
-            hash ^= word;
+    for (std::size_t i = 0; i < len; ++i) {
+        auto byte = data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((byte & 0x80U) != 0) {
+                hash ^= static_cast<std::uint32_t>(prefix >> 32);
+            }
+            prefix <<= 1;
+            byte <<= 1;
         }
-
-        keyOffset += 4;
-        if (keyOffset + 4 > 40) {
-            keyOffset = 0; // циклический ключ
-        }
+        prefix |= (keyIndex < kToeplitzKeyBytes) ? key[keyIndex] : 0;
+        ++keyIndex;
     }
 
     return hash;
@@ -170,7 +176,7 @@ std::uint32_t CalcHash(FiveTuple tuple, std::span<const std::uint8_t> key, HashF
             return 0;
         }
 
-        return key320_hash_calc(key.data(), 0, input.data(), static_cast<int>(inputLen * 8));
+        return key320_hash_calc(key.data(), input.data(), inputLen);
     }
 
     case HashFunc::SIMPLE_XOR: return simple_xor_calc(input.data(), inputLen, key);

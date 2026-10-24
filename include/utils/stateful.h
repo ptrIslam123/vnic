@@ -1,5 +1,8 @@
 #pragma once
 
+#include <expected>
+#include "error_codes.h"
+
 #include <atomic>
 #include <span>
 
@@ -69,62 +72,68 @@ public:
 
     /**
      * @brief Configure the object (calls `Derived::configureImpl()`).
-     * @return `true` on success.
+     * @return `ErrorCode::StateConfigureNotAllowed` if the current state does
+     *         not permit configuration, or the error from `configureImpl()`.
      */
-    template <typename... Args> [[nodiscard]] bool configure(Args&&... args) {
+    template <typename... Args> [[nodiscard]] std::expected<void, ErrorCode> configure(Args&&... args) {
         // Allowed from Stopped, Configured or Error.
         if (!cas({{State::Stopped, State::Configured, State::Error}}, State::Configuring)) [[unlikely]] {
-            return false;
+            return std::unexpected(ErrorCode::StateConfigureNotAllowed);
         }
 
-        if (!self().configureImpl(std::forward<Args>(args)...)) [[unlikely]] {
+        auto result = self().configureImpl(std::forward<Args>(args)...);
+        if (!result) [[unlikely]] {
             setState(State::Error);
-            return false;
+            return result;
         }
 
         setState(State::Configured);
-        return true;
+        return {};
     }
 
     /**
      * @brief Start the object (calls `Derived::startImpl()`).
-     * @return `true` on success.
+     * @return `ErrorCode::StateStartNotAllowed` if the object is not configured,
+     *         or the error from `startImpl()`.
      */
-    template <typename... Args> [[nodiscard]] bool start(Args&&... args) {
+    template <typename... Args> [[nodiscard]] std::expected<void, ErrorCode> start(Args&&... args) {
         if (!cas(State::Configured, State::Starting)) [[unlikely]] {
-            return false;
+            return std::unexpected(ErrorCode::StateStartNotAllowed);
         }
 
         // NOTE: the Started state is published BEFORE startImpl() is called.
-        // For VNic, startImpl() is a blocking RX poll loop that runs while the
-        // state is Started and is stopped by stop() transitioning
+        // For VNic, startImpl() launches the background RX poll loop that runs
+        // while the state is Started and is stopped by stop() transitioning
         // Started -> Stopping. Publishing Started after startImpl() returned
         // would mean the loop never runs and stop() could not finish it.
         setState(State::Started);
-        if (!self().startImpl(std::forward<Args>(args)...)) [[unlikely]] {
+        auto result = self().startImpl(std::forward<Args>(args)...);
+        if (!result) [[unlikely]] {
             setState(State::Error);
-            return false;
+            return result;
         }
 
-        return true;
+        return {};
     }
 
     /**
      * @brief Stop the object (calls `Derived::stopImpl()`).
-     * @return `true` on success.
+     * @return `ErrorCode::StateStopNotAllowed` if the object is not started, or
+     *         the error from `stopImpl()`.
      */
-    template <typename... Args> [[nodiscard]] bool stop(Args&&... args) {
+    template <typename... Args> [[nodiscard]] std::expected<void, ErrorCode> stop(Args&&... args) {
         if (!cas(State::Started, State::Stopping)) [[unlikely]] {
-            return false;
+            return std::unexpected(ErrorCode::StateStopNotAllowed);
         }
 
-        if (!self().stopImpl(std::forward<Args>(args)...)) [[unlikely]] {
+        auto result = self().stopImpl(std::forward<Args>(args)...);
+        if (!result) [[unlikely]] {
             setState(State::Error);
-            return false;
+            return result;
         }
 
         setState(State::Stopped);
-        return true;
+        return {};
     }
 
 protected:

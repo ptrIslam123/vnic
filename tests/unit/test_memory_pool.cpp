@@ -12,6 +12,12 @@ namespace {
 
 using Byte = std::byte;
 
+template <typename Pool> void* Allocate(Pool& pool) {
+    auto block{pool.allocate()};
+    EXPECT_TRUE(block.has_value());
+    return block.value_or(nullptr);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -33,17 +39,17 @@ TEST(MemoryPoolTest, ConfigureReturnsTrueAndAcceptsReconfiguration) {
     config.capacity  = 8;
     config.socketId  = 1;
 
-    EXPECT_TRUE(pool.configure(config));
-    EXPECT_TRUE(pool.configure(config)); // idempotent / reconfigurable
+    EXPECT_TRUE(pool.configure(config).has_value());
+    EXPECT_TRUE(pool.configure(config).has_value()); // idempotent / reconfigurable
 
     config.capacity = 16;
-    EXPECT_TRUE(pool.configure(config));
+    EXPECT_TRUE(pool.configure(config).has_value());
 }
 
 TEST(MemoryPoolTest, UsageWithoutConfigureStillAllocates) {
     vnic::memory::Pool<16> pool; // default-constructed, no configure() call
 
-    void* ptr = pool.allocate();
+    void* ptr = Allocate(pool);
     ASSERT_NE(ptr, nullptr);
     pool.deallocate(ptr);
 }
@@ -55,7 +61,7 @@ TEST(MemoryPoolTest, UsageWithoutConfigureStillAllocates) {
 TEST(MemoryPoolTest, AllocateReturnsNonNull) {
     vnic::memory::Pool<32> pool;
 
-    void* ptr = pool.allocate();
+    void* ptr = Allocate(pool);
 
     ASSERT_NE(ptr, nullptr);
     pool.deallocate(ptr);
@@ -64,8 +70,8 @@ TEST(MemoryPoolTest, AllocateReturnsNonNull) {
 TEST(MemoryPoolTest, AllocateReturnsDistinctBlocks) {
     vnic::memory::Pool<32> pool;
 
-    void* first  = pool.allocate();
-    void* second = pool.allocate();
+    void* first  = Allocate(pool);
+    void* second = Allocate(pool);
 
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);
@@ -78,7 +84,7 @@ TEST(MemoryPoolTest, AllocateReturnsDistinctBlocks) {
 TEST(MemoryPoolTest, AllocateReturnsMaxAlignedBlock) {
     vnic::memory::Pool<64> pool;
 
-    void* ptr = pool.allocate();
+    void* ptr = Allocate(pool);
     ASSERT_NE(ptr, nullptr);
 
     const auto address = reinterpret_cast<std::uintptr_t>(ptr);
@@ -91,7 +97,7 @@ TEST(MemoryPoolTest, AllocateProvidesAtLeastNUsableBytes) {
     constexpr std::size_t kBlockSize = 48;
     vnic::memory::Pool<kBlockSize> pool;
 
-    auto* ptr = static_cast<Byte*>(pool.allocate());
+    auto* ptr = static_cast<Byte*>(Allocate(pool));
     ASSERT_NE(ptr, nullptr);
 
     // The whole block must be writable and readable.
@@ -106,8 +112,8 @@ TEST(MemoryPoolTest, AllocateProvidesAtLeastNUsableBytes) {
 TEST(MemoryPoolTest, BlocksAreIndependent) {
     vnic::memory::Pool<8> pool;
 
-    auto* first  = static_cast<Byte*>(pool.allocate());
-    auto* second = static_cast<Byte*>(pool.allocate());
+    auto* first  = static_cast<Byte*>(Allocate(pool));
+    auto* second = static_cast<Byte*>(Allocate(pool));
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);
 
@@ -124,7 +130,7 @@ TEST(MemoryPoolTest, BlocksAreIndependent) {
 TEST(MemoryPoolTest, SmallerBlockSizeIsRespected) {
     vnic::memory::Pool<4> pool;
 
-    auto* ptr = static_cast<Byte*>(pool.allocate());
+    auto* ptr = static_cast<Byte*>(Allocate(pool));
     ASSERT_NE(ptr, nullptr);
 
     std::memset(ptr, 0x7F, 4);
@@ -148,7 +154,7 @@ TEST(MemoryPoolTest, AllocateDeallocateCyclesAreStable) {
     vnic::memory::Pool<256> pool;
 
     for (int i = 0; i < 1000; ++i) {
-        void* ptr = pool.allocate();
+        void* ptr = Allocate(pool);
         ASSERT_NE(ptr, nullptr);
         pool.deallocate(ptr);
     }
@@ -157,11 +163,11 @@ TEST(MemoryPoolTest, AllocateDeallocateCyclesAreStable) {
 TEST(MemoryPoolTest, AllocateAfterDeallocateStillWorks) {
     vnic::memory::Pool<32> pool;
 
-    void* first = pool.allocate();
+    void* first = Allocate(pool);
     ASSERT_NE(first, nullptr);
     pool.deallocate(first);
 
-    void* second = pool.allocate();
+    void* second = Allocate(pool);
     ASSERT_NE(second, nullptr);
     pool.deallocate(second);
 }
@@ -174,8 +180,8 @@ TEST(MemoryPoolTest, DifferentPoolsAreIndependent) {
     vnic::memory::Pool<16> small;
     vnic::memory::Pool<16> large;
 
-    void* fromSmall = small.allocate();
-    void* fromLarge = large.allocate();
+    void* fromSmall = Allocate(small);
+    void* fromLarge = Allocate(large);
 
     ASSERT_NE(fromSmall, nullptr);
     ASSERT_NE(fromLarge, nullptr);
@@ -189,8 +195,8 @@ TEST(MemoryPoolTest, DifferentBlockSizesCoexist) {
     vnic::memory::Pool<8> p8;
     vnic::memory::Pool<4096> p4096;
 
-    void* a = p8.allocate();
-    void* b = p4096.allocate();
+    void* a = Allocate(p8);
+    void* b = Allocate(p4096);
 
     ASSERT_NE(a, nullptr);
     ASSERT_NE(b, nullptr);
@@ -210,7 +216,7 @@ TEST(MemoryPoolTest, GetConfigReturnsLastAppliedConfiguration) {
     config.capacity  = 32;
     config.socketId  = 3;
 
-    ASSERT_TRUE(pool.configure(config));
+    EXPECT_TRUE(pool.configure(config).has_value());
 
     EXPECT_EQ(pool.getConfig().blockSize, 64u);
     EXPECT_EQ(pool.getConfig().capacity, 32u);
@@ -221,8 +227,8 @@ TEST(MemoryPoolTest, LiveBlocksTracksAllocationsAndReleases) {
     vnic::memory::Pool<32> pool;
     EXPECT_EQ(pool.liveBlocks(), 0u);
 
-    void* first  = pool.allocate();
-    void* second = pool.allocate();
+    void* first  = Allocate(pool);
+    void* second = Allocate(pool);
     EXPECT_EQ(pool.liveBlocks(), 2u);
 
     pool.deallocate(first);
@@ -235,11 +241,11 @@ TEST(MemoryPoolTest, LiveBlocksTracksAllocationsAndReleases) {
 TEST(MemoryPoolTest, TotalBlocksIsMonotonic) {
     vnic::memory::Pool<32> pool;
 
-    void* first = pool.allocate();
+    void* first = Allocate(pool);
     pool.deallocate(first);
     EXPECT_EQ(pool.totalBlocks(), 1u);
 
-    void* second = pool.allocate();
+    void* second = Allocate(pool);
     pool.deallocate(second);
     EXPECT_EQ(pool.totalBlocks(), 2u);
     EXPECT_EQ(pool.liveBlocks(), 0u);
@@ -247,12 +253,13 @@ TEST(MemoryPoolTest, TotalBlocksIsMonotonic) {
 
 TEST(MemoryPoolTest, DeallocateNullptrDoesNotUnderflowCounters) {
     vnic::memory::Pool<32> pool;
-    (void)pool.allocate();
+    void* block = Allocate(pool);
     EXPECT_EQ(pool.liveBlocks(), 1u);
 
     pool.deallocate(nullptr);
 
     EXPECT_EQ(pool.liveBlocks(), 1u);
+    pool.deallocate(block);
 }
 
 TEST(MemoryPoolTest, IsNotCopyableButIsMovable) {
@@ -267,8 +274,8 @@ TEST(MemoryPoolTest, MovePreservesConfigurationAndCounters) {
     vnic::memory::Pool<32> source;
     vnic::memory::Pool<32>::Config config;
     config.capacity = 7;
-    ASSERT_TRUE(source.configure(config));
-    void* block = source.allocate();
+    EXPECT_TRUE(source.configure(config).has_value());
+    void* block = Allocate(source);
     ASSERT_NE(block, nullptr);
 
     vnic::memory::Pool<32> moved{std::move(source)};

@@ -1,48 +1,53 @@
 #include "queue/rx_queue.h"
+#include "constants.h"
 #include "packet/packet_buffer.h"
 #include "utils/scoped_guard.h"
-#include "constanst.h"
 
 #include <array>
+#include <chrono>
+#include <limits>
 
 #include <cstdint>
-#include <cassert>
 
 namespace vnic {
 
-bool RxQueue::put(PacketDescriptor&& desc, std::span<const std::byte> packet) {
+bool RxQueue::Config::isValid() const noexcept { return size > 0; }
+
+std::expected<void, ErrorCode> RxQueue::put(PacketDescriptor&& desc, std::span<const std::byte> packet) {
     const auto bytes{packet.size()};
-    assert(packet.size() == bytes && "payload size must match packet.length");
     if (bytes == 0) [[unlikely]] {
-        return false;
+        return std::unexpected(ErrorCode::QueueZeroLengthPacket);
     }
-    if (free_.isEmpty()) [[unlikely]] {
-        stats_.fetchOverflows();
-        return false;
+    if (bytes > std::numeric_limits<std::uint32_t>::max()) [[unlikely]] {
+        return std::unexpected(ErrorCode::QueuePacketTooLarge);
     }
 
-    const auto segments{static_cast<std::uint64_t>((bytes + PACKET_BUFFER_SIZE - 1) / PACKET_BUFFER_SIZE)};
-    assert(segments <= MAX_SEGMENTS);
+    const auto segments{static_cast<std::uint64_t>((bytes + kPacketBufferSize - 1) / kPacketBufferSize)};
+    if (segments > kMaxSegments) [[unlikely]] {
+        stats_.fetchOverflows();
+        return std::unexpected(ErrorCode::QueueSegmentLimitExceeded);
+    }
 
     // Выделяем все сегменты, не связывая
-    std::array<PacketBuffer*, MAX_SEGMENTS> buffers;
+    static thread_local std::array<PacketBuffer*, kMaxSegments> buffers{};
     std::uint64_t bufferIdx{0};
     utils::ScopedGuard buffersGuard{[&] {
         for (std::uint64_t j{0}; j < bufferIdx; ++j)
             memPool_.deallocate(buffers[j]);
     }};
     for (; bufferIdx < segments; ++bufferIdx) {
-        buffers[bufferIdx] = static_cast<PacketBuffer*>(memPool_.allocate());
-        if (!buffers[bufferIdx]) [[unlikely]] {
-            return false;
+        auto block{memPool_.allocate()};
+        if (!block) [[unlikely]] {
+            return std::unexpected(block.error());
         }
+        buffers[bufferIdx] = static_cast<PacketBuffer*>(*block);
     }
 
     // Заполняем заголовки и связываем
     std::size_t offset{0};
     for (std::uint64_t segmentIdx{0}; segmentIdx < segments; ++segmentIdx) {
         auto buffer{buffers[segmentIdx]};
-        const auto chunk{std::min<std::size_t>(PACKET_BUFFER_SIZE, bytes - offset)};
+        const auto chunk{std::min<std::size_t>(kPacketBufferSize, bytes - offset)};
         buffer->length = static_cast<std::uint32_t>(chunk);
         buffer->next   = (segmentIdx + 1 < segments) ? buffers[segmentIdx + 1] : nullptr;
         std::memcpy(reinterpret_cast<std::byte*>(buffer + 1), packet.data() + offset, chunk);
@@ -51,22 +56,28 @@ bool RxQueue::put(PacketDescriptor&& desc, std::span<const std::byte> packet) {
     desc.buffer      = buffers[0];
     desc.totalLength = static_cast<std::uint32_t>(bytes);
 
-    (void)free_.pop();
-    if (!used_.push(std::move(desc))) [[unlikely]] {
-        // TODO: очислить аллооцированные ресурсы
-        return false;
+    auto slot{free_.pop(std::chrono::microseconds{0})};
+    if (!slot.has_value()) [[unlikely]] {
+        stats_.fetchOverflows();
+        return std::unexpected(ErrorCode::QueueFreeListEmpty);
+    }
+    utils::ScopedGuard slotGuard{[&] { free_.push(std::move(*slot)); }};
+
+    if (auto pushed = used_.push(std::move(desc)); !pushed) [[unlikely]] {
+        return std::unexpected(pushed.error() == ErrorCode::QueueFull ? ErrorCode::QueueUsedListFull : pushed.error());
     }
 
+    slotGuard.cancel();
     stats_.fetchProcessedPackets();
     stats_.fetchProcessedBytes(bytes);
     buffersGuard.cancel();
-    return true;
+    return {};
 }
 
 // Забирает из used_ - очереди все накопленные дескрипторы (не блокируется),
 // возвращает количество изъятых дескрипторов.
 std::uint64_t RxQueue::take(std::vector<PacketDescriptor>& descs) {
-    std::array<PacketDescriptor, MAX_SEGMENTS> storage;
+    static thread_local std::array<PacketDescriptor, kMaxSegments> storage{};
     const auto n{used_.tryPopSome(std::span{storage})};
     descs.insert(descs.cend(), storage.cbegin(), storage.cbegin() + n);
     return n;
@@ -74,56 +85,90 @@ std::uint64_t RxQueue::take(std::vector<PacketDescriptor>& descs) {
 
 // Возвращает дескрипторы обратно в пул свободных и освобождает ВСЮ цепочку
 // буферов пакета (все сегменты через поле next, а не только первый).
-bool RxQueue::free(std::span<const PacketDescriptor> descs) {
+std::expected<void, ErrorCode> RxQueue::free(std::span<const PacketDescriptor> descs) {
     for (const PacketDescriptor& desc : descs) {
-        for (PacketBuffer* segment{desc.buffer}; segment != nullptr;) {
-            PacketBuffer* next = segment->next;
-            memPool_.deallocate(segment);
-            segment = next;
-        }
+        releaseChain(desc.buffer);
     }
-    free_.pushAll(descs);
-    return true;
+    if (auto pushed = free_.pushAll(descs); !pushed) [[unlikely]] {
+        return std::unexpected(pushed.error() == ErrorCode::QueueFull ? ErrorCode::QueueFreeListFull : pushed.error());
+    }
+    return {};
 }
 
-bool RxQueue::configureImpl(const Config& config) {
+void RxQueue::releaseChain(PacketBuffer* head) noexcept {
+    for (PacketBuffer* segment{head}; segment != nullptr;) {
+        PacketBuffer* next = segment->next;
+        memPool_.deallocate(segment);
+        segment = next;
+    }
+}
+
+std::expected<void, ErrorCode> RxQueue::configureImpl(const Config& config) {
+    if (!config.isValid()) {
+        return std::unexpected(ErrorCode::ConfigQueueSizeInvalid);
+    }
     config_ = config;
 
     const MemPool::Config memConfig{
-        .blockSize = PACKET_BUFFER_SIZE, .capacity = config_.size, .socketId = config_.socketId};
-    if (!memPool_.configure(memConfig)) [[unlikely]] {
-        return false;
+        .blockSize = kPacketBufferSize, .capacity = config_.size, .socketId = config_.socketId};
+    if (auto result = memPool_.configure(memConfig); !result) [[unlikely]] {
+        return result;
     }
 
-    return true;
+    const Fifo<PacketDescriptor>::Config fifoConfig{.capacity = config_.size, .socketId = config_.socketId};
+    if (auto result = free_.configure(fifoConfig); !result) [[unlikely]] {
+        return result;
+    }
+    if (auto result = used_.configure(fifoConfig); !result) [[unlikely]] {
+        return result;
+    }
+
+    return {};
 }
 
-bool RxQueue::startImpl() {
-    free_.reserve(config_.size);
-    used_.reserve(config_.size);
+std::expected<void, ErrorCode> RxQueue::start() {
+    if (getState() == State::Stopped) {
+        if (auto result = configure(config_); !result) {
+            return result;
+        }
+    }
+    return utils::Stateful<RxQueue>::start();
+}
+
+std::expected<void, ErrorCode> RxQueue::startImpl() {
+    utils::ScopedGuard cleanup{[this] {
+        while (!free_.isEmpty()) {
+            (void)free_.pop();
+        }
+        while (!used_.isEmpty()) {
+            releaseChain(used_.pop().buffer);
+        }
+    }};
 
     for (decltype(config_.size) i{0}; i < config_.size; ++i) {
         PacketDescriptor desc;
-        if (!free_.push(std::move(desc))) [[unlikely]] {
-            // TODO: очислить аллоцированное
-            return false;
+        if (auto result = free_.push(std::move(desc)); !result) [[unlikely]] {
+            return result;
         }
     }
 
-    return true;
+    cleanup.cancel();
+    return {};
 }
 
-bool RxQueue::stopImpl() {
+std::expected<void, ErrorCode> RxQueue::stopImpl() {
     while (!free_.isEmpty()) {
         (void)free_.pop();
     }
 
     while (!used_.isEmpty()) {
-        (void)used_.pop();
+        releaseChain(used_.pop().buffer);
     }
 
-    return true;
+    return {};
 }
+
+RxQueue::~RxQueue() { (void)stopImpl(); }
 
 const RxQueue::Config& RxQueue::getConfig() const { return config_; }
 const stats::Stats& RxQueue::getStats() const { return stats_; }

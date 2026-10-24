@@ -1,5 +1,5 @@
-#ifndef VS_SCOPED_LOCK_H
-#define VS_SCOPED_LOCK_H
+#ifndef VNIC_UTILS_SCOPED_GUARD_H
+#define VNIC_UTILS_SCOPED_GUARD_H
 
 #include <optional>
 #include <type_traits>
@@ -88,4 +88,4 @@ template <typename T> inline bool ScopedGuard<T>::wasUnlocked() const { return !
 
 } // namespace vnic::utils
 
-#endif //! VS_SCOPED_LOCK_H
+#endif //! VNIC_UTILS_SCOPED_GUARD_H

@@ -1,15 +1,19 @@
 #pragma once
 
+#include <expected>
+#include "error_codes.h"
+
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
 #include <optional>
 #include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <vector>
 #include <span>
-#include <cstddef>
 #include <utility>
+#include <vector>
 
-#include <cstddef>
 #include <cassert>
 
 /**
@@ -31,6 +35,17 @@ namespace vnic {
  */
 template <typename T> class Fifo final {
 public:
+    /**
+     * @brief FIFO configuration.
+     */
+    struct Config {
+        std::size_t capacity{0};   ///< Maximum queued elements (`0` = unbounded).
+        std::uint32_t socketId{0}; ///< NUMA socket hint (reserved; TODO).
+
+        /// @brief Whether the configuration is valid.
+        [[nodiscard]] constexpr bool isValid() const noexcept { return true; }
+    };
+
     Fifo() = default;
 
     Fifo(const Fifo&)            = delete;
@@ -39,71 +54,107 @@ public:
     /// @brief Move constructor.
     Fifo(Fifo&& other) noexcept {
         std::scoped_lock lock{other.mutex_};
-        queue_ = std::move(other.queue_);
-        wake_  = other.wake_;
+        queue_  = std::move(other.queue_);
+        config_ = other.config_;
     }
 
     /// @brief Move assignment.
     Fifo& operator=(Fifo&& other) noexcept {
         if (this != &other) {
             std::scoped_lock lock{mutex_, other.mutex_};
-            queue_ = std::move(other.queue_);
-            wake_  = other.wake_;
+            queue_  = std::move(other.queue_);
+            config_ = other.config_;
         }
         return *this;
     }
 
     /// @brief Construct an element in place and notify one waiter.
-    template <typename... Args> bool emplace(Args&&... args) {
+    ///
+    /// @return `ErrorCode::QueueFull` if a capacity was set with `reserve()`
+    ///         and the queue is already full.
+    template <typename... Args> std::expected<void, ErrorCode> emplace(Args&&... args) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (isFullLocked()) {
+                return std::unexpected(ErrorCode::QueueFull);
+            }
             queue_.emplace(std::forward<Args>(args)...);
         }
         condVar_.notify_one();
-        return true;
+        return {};
     }
 
     /// @brief Push a copy of @p value and notify one waiter.
-    bool push(const T& value) {
+    ///
+    /// @return `ErrorCode::QueueFull` if a capacity was set with `reserve()`
+    ///         and the queue is already full.
+    std::expected<void, ErrorCode> push(const T& value) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (isFullLocked()) {
+                return std::unexpected(ErrorCode::QueueFull);
+            }
             queue_.push(value);
         }
         condVar_.notify_one();
-        return true;
+        return {};
     }
 
     /// @brief Push @p value by move and notify one waiter.
-    bool push(T&& value) {
+    ///
+    /// @return `ErrorCode::QueueFull` if a capacity was set with `reserve()`
+    ///         and the queue is already full.
+    std::expected<void, ErrorCode> push(T&& value) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (isFullLocked()) {
+                return std::unexpected(ErrorCode::QueueFull);
+            }
             queue_.push(std::move(value));
         }
         condVar_.notify_one();
-        return true;
+        return {};
     }
 
     /// @brief Push all elements of @p data and notify all waiters.
-    void pushAll(std::span<const T> data) {
+    ///
+    /// @return `ErrorCode::QueueFull` if a capacity was set with `reserve()`
+    ///         and some elements could not be queued; the elements that fit
+    ///         before the queue filled up are still stored.
+    std::expected<void, ErrorCode> pushAll(std::span<const T> data) {
+        bool full{false};
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (const auto& item : data) {
+                if (isFullLocked()) {
+                    full = true;
+                    break;
+                }
                 queue_.push(item);
             }
         }
         condVar_.notify_all();
+        if (full) {
+            return std::unexpected(ErrorCode::QueueFull);
+        }
+        return {};
     }
 
     /// @brief Push all elements of @p data; returns the number pushed.
     std::size_t pushSome(std::span<const T> data) {
+        std::size_t pushed{0};
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (const auto& item : data) {
+                if (isFullLocked()) {
+                    break;
+                }
                 queue_.push(item);
+                ++pushed;
             }
         }
         condVar_.notify_all();
-        return data.size();
+        return pushed;
     }
 
     /// @brief Wait up to @p timeout for an element; return it, or `nullopt`.
@@ -202,8 +253,46 @@ public:
         return count;
     }
 
-    /// @brief Reserved capacity hint (currently a no-op).
-    void reserve(std::size_t) {}
+    /// @brief Apply @p config to the queue.
+    ///
+    /// The capacity is a logical reservation: the FIFO does not pre-allocate
+    /// storage, but subsequent pushes fail once the queue reaches it.
+    ///
+    /// @return `ErrorCode::ConfigQueueInvalid` if the configuration is invalid.
+    std::expected<void, ErrorCode> configure(const Config& config) {
+        if (!config.isValid()) {
+            return std::unexpected(ErrorCode::ConfigQueueInvalid);
+        }
+        std::lock_guard<std::mutex> lock{mutex_};
+        config_ = config;
+        return {};
+    }
+
+    /// @brief Current configuration.
+    ///
+    /// Configure the queue before sharing it between threads.
+    [[nodiscard]] const Config& getConfig() const noexcept { return config_; }
+
+    /// @brief Set the maximum number of queued elements (`0` = unbounded).
+    ///
+    /// This is a logical reservation: the FIFO does not pre-allocate storage,
+    /// but subsequent pushes fail once the queue reaches @p capacity.
+    void reserve(std::size_t capacity) {
+        std::lock_guard<std::mutex> lock{mutex_};
+        config_.capacity = capacity;
+    }
+
+    /// @brief Maximum number of queued elements (`0` = unbounded).
+    std::size_t capacity() const {
+        std::lock_guard<std::mutex> lock{mutex_};
+        return config_.capacity;
+    }
+
+    /// @brief NUMA socket hint (reserved; not used by the implementation yet).
+    [[nodiscard]] std::uint32_t socketId() const {
+        std::lock_guard<std::mutex> lock{mutex_};
+        return config_.socketId;
+    }
 
     /// @brief Whether the queue is empty.
     bool isEmpty() const {
@@ -218,10 +307,12 @@ public:
     }
 
 private:
+    bool isFullLocked() const noexcept { return config_.capacity != 0 && queue_.size() >= config_.capacity; }
+
     std::condition_variable condVar_;
     mutable std::mutex mutex_;
     std::queue<T> queue_;
-    bool wake_{false};
+    Config config_;
 };
 
 } // namespace vnic

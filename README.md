@@ -1,119 +1,159 @@
+# VNic — Userspace NIC Emulation
 
-# VNic — программная эмуляция сетевой карты (NIC)
+**VNic** is a library for emulating a network interface card (NIC) in user space. It reproduces the behavior of real network hardware: RX/TX queues, descriptors, RSS, RETA, and the link — without physical hardware.
 
-**VNic** — это библиотека для программной эмуляции сетевой карты (NIC) на уровне пользовательского пространства. Она воспроизводит поведение реального сетевого оборудования: очереди RX/TX, дескрипторы, кольцевые буферы, RSS, RETA, оффлоады и линк — без необходимости в физическом железе.
-
-Проект вдохновлён архитектурой **DPDK** и следует её ключевым принципам: zero-copy, пулы буферов, разделение конфигурации порта и очередей, работа с дескрипторами вместо самих пакетов.
-
----
-
-## Мотивация
-
-Разработка и тестирование сетевых приложений на DPDK или eBPF сталкивается с фундаментальной проблемой: **без реального NIC нельзя проверить поведение системы**.
-
-VNic решает эту проблему:
-
-| Проблема | Решение VNic |
-|----------|--------------|
-| Нужно физическое железо | Полностью программная эмуляция |
-| Сложно тестировать в CI/CD | Работает в userspace, без root |
-| Невозможно воспроизвести сценарии (переполнение, дропы, обрыв линка) | Полный контроль над состоянием NIC |
-| Дорогое и медленное развёртывание стендов | Лёгкая библиотека на C++20 |
+The project is inspired by **DPDK**: separation of port and queue configuration, descriptors, and buffer chains. In 0.1.x the Link and buffer pools remain simplified (frames are copied and pools use `malloc`); see “0.1.x limitations”.
 
 ---
 
-Миссия - Сделать разработку и тестирование высокопроизводительных сетевых систем доступной без физического оборудования.**
+## Motivation
 
-- Инженер должен иметь возможность **воспроизвести любое поведение NIC** в unit-тестах.
-- **Эмуляция не должна уступать реальному железу** по реалистичности архитектуры.
-- **Тестирование сетевых приложений** должно быть таким же простым, как тестирование обычного backend-кода.
+Developing and testing network applications with DPDK or eBPF faces a fundamental problem: **without a real NIC, system behavior cannot be verified**.
 
----
+VNic addresses this problem:
 
-## Ключевые возможности
-
-Реализовано (0.1.0):
-
-- **Очереди RX/TX** с кольцевыми буферами и дескрипторами
-- **Парсер кадров**: Ethernet, VLAN (802.1Q/802.1AD), IPv4, IPv6, ARP, TCP/UDP/ICMP
-- **RSS** с настраиваемыми хэш-функциями (Toeplitz, XOR, CRC32) для IPv4 и IPv6
-- **RETA** (Redirection Table): проверка на степень двойки, потокобезопасное обновление (RCU)
-- **Проверки на приёме**: размер кадра (runts/MTU), FCS, фильтр dst MAC, VLAN-фильтр, IPv4 total length и checksum
-- **Цепочки пакетов** (`next`) для Jumbo Frames
-- **Link** (in-memory): состояние up/down, скорость/дуплекс
-- **Статистика** по NIC (RX и TX) и по каждой очереди отдельно
-- **Работа через дескрипторы и буферы**
-
-Запланировано (см. `dock/архитектура.md`):
-
-- **Пулы буферов** с предварительным выделением (сейчас — заглушка на `malloc`)
-- **NUMA-aware** пулы и привязка очередей к NUMA-узлам
-- **Оффлоады** (checksum/TSO/VLAN offload)
+| Problem | VNic solution |
+|---------|---------------|
+| Physical hardware required | Fully software-emulated |
+| Hard to test in CI/CD | Runs in user space, no root required |
+| Cannot reproduce scenarios (overflows, drops, link down) | Full control over NIC state |
+| Expensive and slow testbed deployment | Lightweight C++23 library |
 
 ---
 
-## Зависимости
+**Mission** — make the development and testing of high-performance network systems accessible without physical hardware.
 
-Внешних зависимостей нет: нужны только компилятор с C++20 и CMake ≥ 3.18.
-GoogleTest подтягивается автоматически (только для сборки тестов).
+- An engineer must be able to **reproduce any NIC behavior** in unit tests.
+- **The emulation must not fall short of real hardware** in architectural realism.
+- **Testing network applications** must be as simple as testing ordinary backend code.
 
-## Сборка
+---
+
+## Key features
+
+Implemented in 0.1.0:
+
+- **RX/TX queues** built on FIFO and descriptors
+- **Frame parser**: Ethernet, VLAN (802.1Q/802.1AD), IPv4, IPv6, ARP, TCP/UDP/ICMP
+- **RSS** with configurable hash functions (Toeplitz, XOR, CRC32) for IPv4 and IPv6
+- **RETA** (Redirection Table): power-of-two validation and thread-safe updates via `utils::Rcu` (in 0.1.x backed by `std::shared_mutex`)
+- **Receive-side checks**: frame size (runts/MTU), destination MAC filter, VLAN filter, IPv4 total length, and checksum. FCS is not checked in 0.1.x: `Link` carries frames without FCS, and `validate::CheckFcs()` is a stub
+- **Packet chains** (`next`) for jumbo frames
+- **Link** (in-memory): up/down state and configurable RX/TX queue depth and slot size
+- **Statistics** for the NIC (RX and TX) and for each queue separately
+- **Descriptor and buffer-based operation**
+- **Unified error handling**: native `std::expected<T, ErrorCode>` / `std::expected<void, ErrorCode>`, with the failing component’s error propagated up the chain
+
+Planned (see `dock/architecture.md`):
+
+- **Buffer pools** with pre-allocation (currently a `malloc` stub)
+- **NUMA-aware** pools and queue-to-NUMA-node affinity
+- **Offloads** (checksum/TSO/VLAN offload)
+
+### 0.1.x limitations
+
+- The Link is in-memory only; there is no kernel/netlink backend.
+- End-to-end zero-copy is not implemented: the Link and queues copy frames, and pools use `malloc`.
+- FCS is not checked (`validate::CheckFcs()` is a stub).
+- `utils::Rcu<T>` uses `std::shared_mutex`, not a lock-free scheme.
+
+---
+
+## Dependencies
+
+There are no external dependencies: only a C++23 compiler and CMake ≥ 3.24 are required. GoogleTest is fetched automatically (only when building tests).
+
+The supported platform is Linux with GCC or Clang: public headers use Linux headers (`<linux/...>`, `<net/if_arp.h>`), and counters and state use built-in `__atomic_*` operations.
+
+## Building
 
 ```bash
-git clone <repo>
+git clone https://github.com/ptrIslam123/vnic.git
 cd vnic
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 ```
 
-## Тесты
+## Tests
+
+The suite contains GoogleTest unit tests.
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-## Установка и подключение
+To check memory safety and undefined behavior:
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DVNIC_SANITIZE=ON
+cmake --build build-asan -j"$(nproc)"
+ctest --test-dir build-asan --output-on-failure
+```
+
+## Test coverage
+
+Coverage is collected with gcov and the report is generated with lcov/genhtml. The `gcov`, `lcov`, and `genhtml` tools must be installed. On Debian/Ubuntu:
+
+```bash
+sudo apt install lcov
+```
+
+Build with coverage and run the tests:
+
+```bash
+cmake -S . -B build-coverage -DCMAKE_BUILD_TYPE=Debug -DVNIC_COVERAGE=ON
+cmake --build build-coverage -j"$(nproc)"
+cmake --build build-coverage --target coverage
+```
+
+The `coverage` target clears counters, runs `ctest`, and collects coverage only for the `vnic` library; system headers, GoogleTest, tests, and examples are excluded from the report. If `lcov`/`genhtml` are not found, CMake prints a warning and does not create the `coverage` target.
+
+View the HTML report:
+
+```bash
+xdg-open build-coverage/coverage-html/index.html
+# or without a GUI:
+python3 -m http.server -d build-coverage/coverage-html 8000
+# http://localhost:8000
+```
+
+Console summary:
+
+```bash
+lcov --summary build-coverage/coverage.filtered.info
+```
+
+The HTML report shows line by line which parts of `src/` and `include/` are not covered by tests.
+
+## Installation and integration
 
 ```bash
 cmake --install build --prefix /usr/local
 ```
 
-Затем в своём проекте:
+The installation includes the library, public headers, CMake package config, and `LICENSE` and `README.md` under `share/doc/vnic`.
+
+Then, in your project:
 
 ```cmake
 find_package(vnic 0.1 REQUIRED)
 target_link_libraries(my_app PRIVATE vnic::vnic)
 ```
 
-## Форматирование кода
+## Documentation
 
-Стиль задаётся `.clang-format` в корне (clang-format 18+), исключения — в
-`.clang-format-ignore`. Требуется установленный `clang-format`.
+- `dock/architecture.md` — architecture and subsystem design.
+- `TODO.md` — known limitations and planned architectural work.
 
-```bash
-cmake --build build --target format        # переформатировать код на месте
-cmake --build build --target check-format  # только проверка (для CI)
-```
-
-Или напрямую: `clang-format -i <files>`. Таргеты не входят в сборку по умолчанию
-(отключаются опцией `-DVNIC_FORMAT_TARGETS=OFF`).
-
-## Документация
-
-- `dock/архитектура.md` — архитектура и устройство подсистем.
-- API-документация генерируется из Doxygen-комментариев в заголовках
-  (`include/`). Сборка (требуется `doxygen`):
+API documentation is generated from Doxygen comments in the headers (`include/`).
+Building it requires `doxygen`:
 
 ```bash
 cmake -S . -B build -DVNIC_BUILD_DOCS=ON
 cmake --build build --target vnic-docs
-# результат: dock/api/html/index.html
+# output: dock/api/html/index.html
 ```
 
-Или напрямую: `doxygen Doxyfile`.
+Or directly: `doxygen Doxyfile`.
 
-> **Важно:** таргет `vnic-docs` не входит в сборку по умолчанию, поэтому
-> документация **не** перегенерируется при каждой сборке (`cmake --build build`).
-> Doxygen запускается только явной командой `--target vnic-docs` (и только если
-> проект сконфигурирован с `-DVNIC_BUILD_DOCS=ON`). Для авто-перегенерации
-> добавьте в `CMakeLists.txt` строку `add_dependencies(vnic vnic-docs)`.
+> **Important:** the `vnic-docs` target is not part of the default build, so the documentation is **not** regenerated on every build (`cmake --build build`). Doxygen runs only when the target is requested explicitly (`--target vnic-docs`) and only if the project was configured with `-DVNIC_BUILD_DOCS=ON`. To regenerate automatically, add `add_dependencies(vnic vnic-docs)` to `CMakeLists.txt`.

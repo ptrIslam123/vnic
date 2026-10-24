@@ -1,25 +1,26 @@
 #pragma once
 
+#include <expected>
 #include "link/link.h"
 #include "queue/rx_queue.h"
 #include "queue/tx_queue.h"
 #include "rss/hash.h"
 #include "utils/rcu.h"
-#include "utils/state_ful.h"
+#include "utils/stateful.h"
 #include "validate/validate.h"
 
+#include <array>
 #include <cstddef>
-#include <vector>
 #include <span>
 #include <thread>
-#include <array>
+#include <vector>
 
 #include <cstdint>
 
 /**
  * @file
- * @brief The VNic port — the top-level object that ties queues, RSS and the link
- *        together and runs the RX poll loop.
+ * @brief The VNic port — the top-level object that ties queues, RSS and the
+ * link together and runs the RX poll loop.
  */
 
 namespace vnic {
@@ -28,7 +29,8 @@ class Parser;
 
 /**
  * @defgroup group_vnic Port (VNic)
- * @brief Top-level NIC port: configuration, RX/TX queues, RSS/RETA and the link.
+ * @brief Top-level NIC port: configuration, RX/TX queues, RSS/RETA and the
+ * link.
  * @{
  */
 
@@ -52,8 +54,8 @@ class Parser;
  * queue lookup on the hot path reads the RETA through @ref utils::Rcu, so RETA
  * may be replaced at runtime with `updateReta()`.
  *
- * @note This is version 0.1.0: buffer pools are `malloc`-backed stubs, there are
- *       no offloads, and the link is purely in-memory (no kernel/netlink).
+ * @note This is version 0.1.x: buffer pools are `malloc`-backed stubs, there
+ * are no offloads, and the link is purely in-memory (no kernel/netlink).
  */
 class VNic final : public utils::Stateful<VNic> {
 public:
@@ -62,15 +64,7 @@ public:
     VNic(VNic&&)                 = delete;
     VNic& operator=(const VNic&) = delete;
     VNic& operator=(VNic&&)      = delete;
-
-    /**
-     * @brief Reason why the last configuration attempt failed.
-     */
-    enum class ErrorCode : std::uint8_t {
-        None = 0, ///< No error.
-        Error,    ///< Generic configuration error.
-        // TODO: split into specific codes as failure reasons grow.
-    };
+    ~VNic();
 
     /**
      * @brief Port configuration passed to `configure(const Config&)`.
@@ -96,12 +90,24 @@ public:
             rss::SymmetryMode symmetry{}; ///< Whether A->B and B->A hash equally.
             Key key{};                    ///< Hash key (at least 40 bytes when enabled).
             Reta reta{};                  ///< Explicit RETA; empty = round-robin default.
-        } rss;                            ///< RSS configuration.
+
+            /// @brief Validate the RSS configuration and return the reason.
+            [[nodiscard]] ErrorCode validate() const noexcept;
+
+            /// @brief Validate the RSS configuration.
+            [[nodiscard]] bool isValid() const noexcept;
+        } rss; ///< RSS configuration.
 
         std::string macAddr{};                      ///< MAC address `"aa:bb:cc:dd:ee:ff"` (empty allowed).
         std::vector<std::string> ipAddrs{};         ///< Port IP addresses (not yet used on the RX path).
         std::vector<std::uint16_t> vlanAllowList{}; ///< Allowed VLAN IDs; empty = VLAN filter disabled.
-        Link::Config link{};                        ///< Link speed and duplex.
+        Link::Config link{};                        ///< Link pipe depths and slot sizes.
+
+        /// @brief Validate the whole port configuration and return the reason.
+        [[nodiscard]] ErrorCode validate() const noexcept;
+
+        /// @brief Validate the whole port configuration.
+        [[nodiscard]] bool isValid() const noexcept;
     };
 
     /// @name Link
@@ -119,17 +125,18 @@ public:
      * @brief Replace the RSS redirection table.
      * @param reta New table. Must be non-empty, its size a power of two, and
      *             every entry `< Config::rxQueueCount`.
-     * @return `true` on success, `false` if validation fails.
+     * @return `ErrorCode::RssRetaEmpty`, `ErrorCode::RssRetaSizeInvalid` or
+     *         `ErrorCode::RssRetaQueueOutOfRange` if validation fails.
      * @note Thread-safe; the RX poll loop observes the new table atomically.
      */
-    bool updateReta(Config::Rss::Reta&& reta);
+    [[nodiscard]] std::expected<void, ErrorCode> updateReta(Config::Rss::Reta&& reta);
 
     /**
      * @brief Replace the RSS redirection table (copy overload).
      * @param reta New table (same constraints as the rvalue overload).
-     * @return `true` on success, `false` if validation fails.
+     * @return Same errors as the rvalue overload.
      */
-    bool updateReta(const Config::Rss::Reta& reta);
+    [[nodiscard]] std::expected<void, ErrorCode> updateReta(const Config::Rss::Reta& reta);
     /// @}
 
     /// @name Data path
@@ -143,31 +150,34 @@ public:
      * @param queueId Target TX queue index.
      * @param descs   Descriptors to send. Each descriptor must reference a
      *                @ref PacketBuffer chain.
-     * @return Number of descriptors actually transmitted; `0` if `queueId` is
-     *         out of range or nothing could be sent.
+     * @return Number of descriptors actually transmitted. A partial burst is a
+     *         success; if nothing was transmitted because of an error (including
+     *         an invalid @p queueId), the error is returned.
      */
-    std::size_t tx(std::uint16_t queueId, std::span<PacketDescriptor> descs);
+    [[nodiscard]] std::expected<std::size_t, ErrorCode> tx(std::uint16_t queueId, std::span<PacketDescriptor> descs);
 
     /**
-     * @brief Receive up to @ref MAX_SEGMENTS descriptors from an RX queue.
+     * @brief Receive up to `kMaxSegments` descriptors from an RX queue.
      *
      * Non-blocking: appends whatever is currently available to @p descs.
      *
      * @param queueId Source RX queue index.
      * @param descs   Output vector; received descriptors are appended.
-     * @return Number of descriptors appended, or `-1` if `queueId` is invalid.
+     * @return Number of descriptors appended; `ErrorCode::QueueInvalidId` if
+     *         @p queueId is out of range.
      * @warning Return the descriptors with `freeRx()`; their buffers belong to
      *          the queue's memory pool.
      */
-    std::int64_t rx(std::uint16_t queueId, std::vector<PacketDescriptor>& descs);
+    [[nodiscard]] std::expected<std::size_t, ErrorCode> rx(std::uint16_t queueId, std::vector<PacketDescriptor>& descs);
 
     /**
      * @brief Return descriptors previously obtained via `rx()` to the queue.
      * @param queueId Queue the descriptors came from.
      * @param descs   Descriptors to release (all `next` segments are freed).
-     * @return `true` on success, `false` if `queueId` is invalid.
+     * @return `ErrorCode::QueueInvalidId` if @p queueId is out of range, or the
+     *         queue's error if the descriptors cannot be released.
      */
-    bool freeRx(std::uint16_t queueId, std::span<const PacketDescriptor> descs);
+    [[nodiscard]] std::expected<void, ErrorCode> freeRx(std::uint16_t queueId, std::span<const PacketDescriptor> descs);
     /// @}
 
     /// @name Statistics
@@ -200,8 +210,6 @@ public:
     /// @brief Copy of the current RETA (control-plane use).
     Config::Rss::Reta getReta() const;
 
-    /// @brief Reason of the last configuration failure.
-    enum ErrorCode getErrorCode() const;
     /// @}
 
 private:
@@ -209,25 +217,25 @@ private:
     friend utils::Stateful<VNic>;
     /// @endcond
 
-    bool startImpl();
-    bool stopImpl();
+    std::expected<void, ErrorCode> startImpl();
+    std::expected<void, ErrorCode> stopImpl();
 
-    bool configureImpl(const Config& config);
-    bool configureImpl(std::uint16_t queueId, const RxQueue::Config& config);
-    bool configureImpl(std::uint16_t queueId, const TxQueue::Config& config);
+    std::expected<void, ErrorCode> configureImpl(const Config& config);
+    std::expected<void, ErrorCode> configureImpl(std::uint16_t queueId, const RxQueue::Config& config);
+    std::expected<void, ErrorCode> configureImpl(std::uint16_t queueId, const TxQueue::Config& config);
 
-    bool initReta(Config::Rss::Reta& reta);
-    bool configureRss();
-    bool configureQueues();
-    bool configureLink();
+    std::expected<void, ErrorCode> initReta(Config::Rss::Reta& reta);
+    std::expected<void, ErrorCode> configureRss();
+    std::expected<void, ErrorCode> configureQueues();
+    std::expected<void, ErrorCode> configureLink();
 
-    bool validate(std::span<const std::byte> packet, const Parser& parser) const;
+    std::expected<void, ErrorCode> validate(std::span<const std::byte> packet, const Parser& parser);
 
-    void distribute(const Parser& parser, std::span<const std::byte> payload);
+    std::expected<void, ErrorCode> distribute(const Parser& parser, std::span<const std::byte> payload);
     void poll(std::stop_token stopToken);
 
-    bool startQueues();
-    bool stopQueues();
+    std::expected<void, ErrorCode> startQueues();
+    std::expected<void, ErrorCode> stopQueues();
 
     Link link_;
     utils::Rcu<Config::Rss::Reta> reta_;
@@ -239,7 +247,6 @@ private:
     std::vector<TxQueue::Config> txQueueConfigs_;
     Config config_;
     std::array<std::uint8_t, 6> macAddr_{};
-    ErrorCode eCode_{ErrorCode::None};
 
     std::jthread thread_;
 };

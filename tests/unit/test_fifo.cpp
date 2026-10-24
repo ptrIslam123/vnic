@@ -32,10 +32,6 @@ struct MoveOnly {
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// Construction / emptiness
-// ---------------------------------------------------------------------------
-
 TEST(FifoTest, DefaultConstructedIsEmpty) {
     vnic::Fifo<int> fifo;
 
@@ -70,74 +66,81 @@ TEST(FifoTest, ReserveIsCallableAndDoesNotChangeSize) {
 
     fifo.reserve(128);
 
+    EXPECT_EQ(fifo.capacity(), 128u);
     EXPECT_EQ(fifo.size(), 0u);
     EXPECT_TRUE(fifo.isEmpty());
 }
 
-// ---------------------------------------------------------------------------
-// push
-// ---------------------------------------------------------------------------
+TEST(FifoTest, ReserveLimitsQueueDepth) {
+    vnic::Fifo<int> fifo;
+    fifo.reserve(2);
+
+    EXPECT_TRUE(fifo.push(1).has_value());
+    EXPECT_TRUE(fifo.push(2).has_value());
+    EXPECT_FALSE(fifo.push(3).has_value());
+    EXPECT_EQ(fifo.size(), 2u);
+
+    EXPECT_EQ(fifo.pop(), 1);
+    EXPECT_TRUE(fifo.push(3).has_value());
+    EXPECT_EQ(fifo.size(), 2u);
+
+    const std::array<int, 3> more{4, 5, 6};
+    EXPECT_EQ(fifo.pushSome(more), 0u); // already full
+}
 
 TEST(FifoTest, PushCopyReturnsTrueAndStoresElement) {
     vnic::Fifo<int> fifo;
     const int value = 42;
 
-    EXPECT_TRUE(fifo.push(value));
+    EXPECT_TRUE(fifo.push(value).has_value());
     EXPECT_EQ(fifo.size(), 1u);
-    EXPECT_EQ(fifo.pop(), 42);
+    EXPECT_EQ(fifo.pop(), value);
 }
 
 TEST(FifoTest, PushMoveReturnsTrueAndStoresElement) {
     vnic::Fifo<std::string> fifo;
     std::string value = "hello";
 
-    EXPECT_TRUE(fifo.push(std::move(value)));
+    EXPECT_TRUE(fifo.push(std::move(value)).has_value());
     EXPECT_EQ(fifo.size(), 1u);
-    EXPECT_EQ(fifo.pop(), "hello");
+    EXPECT_EQ(fifo.pop(), std::string{"hello"});
 }
-
-// ---------------------------------------------------------------------------
-// emplace
-// ---------------------------------------------------------------------------
 
 TEST(FifoTest, EmplaceConstructsElementInPlace) {
     vnic::Fifo<int> fifo;
+    const int value = 42;
 
-    EXPECT_TRUE(fifo.emplace(7));
+    EXPECT_TRUE(fifo.emplace(value).has_value());
     EXPECT_EQ(fifo.size(), 1u);
-    EXPECT_EQ(fifo.pop(), 7);
+    EXPECT_EQ(fifo.pop(), value);
 }
 
 TEST(FifoTest, EmplaceForwardsMultipleArguments) {
     vnic::Fifo<std::string> fifo;
 
-    EXPECT_TRUE(fifo.emplace(3, 'x')); // std::string(3, 'x') == "xxx"
+    EXPECT_TRUE(fifo.emplace(3, 'x').has_value()); // std::string(3, 'x') == "xxx"
     EXPECT_EQ(fifo.pop(), "xxx");
 }
 
 TEST(FifoTest, EmplaceConstructsMoveOnlyElement) {
     vnic::Fifo<std::unique_ptr<int>> fifo;
 
-    EXPECT_TRUE(fifo.emplace(std::make_unique<int>(11)));
+    EXPECT_TRUE(fifo.emplace(std::make_unique<int>(11)).has_value());
     auto value = fifo.pop();
     ASSERT_NE(value, nullptr);
     EXPECT_EQ(*value, 11);
 }
 
-// ---------------------------------------------------------------------------
-// pushAll / pushSome
-// ---------------------------------------------------------------------------
-
 TEST(FifoTest, PushAllStoresEveryElementInOrder) {
     vnic::Fifo<int> fifo;
-    const std::array<int, 3> data{1, 2, 3};
+    const std::array data{1, 2, 3};
 
     fifo.pushAll(data);
 
-    EXPECT_EQ(fifo.size(), 3u);
-    EXPECT_EQ(fifo.pop(), 1);
-    EXPECT_EQ(fifo.pop(), 2);
-    EXPECT_EQ(fifo.pop(), 3);
+    EXPECT_EQ(fifo.size(), data.size());
+    for (auto i{0}; i < data.size(); ++i) {
+        EXPECT_EQ(fifo.pop(), data[i]);
+    }
 }
 
 TEST(FifoTest, PushAllWithEmptySpanDoesNothing) {
@@ -151,14 +154,13 @@ TEST(FifoTest, PushAllWithEmptySpanDoesNothing) {
 
 TEST(FifoTest, PushSomeReturnsNumberOfElementsPushed) {
     vnic::Fifo<int> fifo;
-    const std::array<int, 4> data{10, 20, 30, 40};
+    const std::array data{10, 20, 30, 40};
 
-    EXPECT_EQ(fifo.pushSome(data), 4u);
-    EXPECT_EQ(fifo.size(), 4u);
-    EXPECT_EQ(fifo.pop(), 10);
-    EXPECT_EQ(fifo.pop(), 20);
-    EXPECT_EQ(fifo.pop(), 30);
-    EXPECT_EQ(fifo.pop(), 40);
+    EXPECT_EQ(fifo.pushSome(data), data.size());
+    EXPECT_EQ(fifo.size(), data.size());
+    for (auto i{0}; i < data.size(); ++i) {
+        EXPECT_EQ(fifo.pop(), data[i]);
+    }
 }
 
 TEST(FifoTest, PushSomeWithEmptySpanReturnsZero) {
@@ -168,10 +170,6 @@ TEST(FifoTest, PushSomeWithEmptySpanReturnsZero) {
     EXPECT_EQ(fifo.pushSome(empty), 0u);
     EXPECT_TRUE(fifo.isEmpty());
 }
-
-// ---------------------------------------------------------------------------
-// pop
-// ---------------------------------------------------------------------------
 
 TEST(FifoTest, PopBlockingReturnsElementsInFifoOrder) {
     vnic::Fifo<int> fifo;
@@ -210,7 +208,7 @@ TEST(FifoTest, PopWakesBlockedConsumer) {
     std::jthread consumer{[&fifo, &received] { received = fifo.pop(); }};
 
     std::this_thread::sleep_for(10ms);
-    EXPECT_TRUE(fifo.push(123));
+    EXPECT_TRUE(fifo.push(123).has_value());
 
     consumer.join();
     EXPECT_EQ(received, 123);
@@ -223,7 +221,7 @@ TEST(FifoTest, PopWithTimeoutWakesOnPush) {
     std::jthread consumer{[&fifo, &received] { received = fifo.pop(1s); }};
 
     std::this_thread::sleep_for(10ms);
-    EXPECT_TRUE(fifo.push(321));
+    EXPECT_TRUE(fifo.push(321).has_value());
 
     consumer.join();
     ASSERT_TRUE(received.has_value());
@@ -238,13 +236,13 @@ TEST(FifoTest, PopSomeVectorDrainsWholeQueueAndAppends) {
     vnic::Fifo<int> fifo;
     fifo.push(1);
     fifo.push(2);
-    std::vector<int> buffer{100}; // pre-existing content must be preserved
+    std::vector<int> buffer{64}; // pre-existing content must be preserved
 
     const std::size_t count = fifo.popSome(buffer);
 
     EXPECT_EQ(count, 2u);
     ASSERT_EQ(buffer.size(), 3u);
-    EXPECT_EQ(buffer[0], 100);
+    EXPECT_EQ(buffer[0], 64);
     EXPECT_EQ(buffer[1], 1);
     EXPECT_EQ(buffer[2], 2);
     EXPECT_TRUE(fifo.isEmpty());
@@ -273,10 +271,6 @@ TEST(FifoTest, PopSomeVectorWithTimeoutReturnsZeroWhenEmpty) {
     EXPECT_EQ(count, 0u);
     EXPECT_TRUE(buffer.empty());
 }
-
-// ---------------------------------------------------------------------------
-// popSome(span<T, N>)
-// ---------------------------------------------------------------------------
 
 TEST(FifoTest, PopSomeSpanBlockingPopsUpToN) {
     vnic::Fifo<int> fifo;
@@ -316,10 +310,6 @@ TEST(FifoTest, PopSomeSpanWithTimeoutReturnsZeroWhenEmpty) {
     EXPECT_EQ(count, 0u);
 }
 
-// ---------------------------------------------------------------------------
-// tryPopSome
-// ---------------------------------------------------------------------------
-
 TEST(FifoTest, TryPopSomeReturnsZeroWhenEmpty) {
     vnic::Fifo<int> fifo;
 
@@ -342,9 +332,25 @@ TEST(FifoTest, TryPopSomePopsUpToNWithoutBlocking) {
     EXPECT_EQ(fifo.size(), 2u);
 }
 
-// ---------------------------------------------------------------------------
-// Move semantics
-// ---------------------------------------------------------------------------
+TEST(FifoTest, ConfigureStoresCapacityAndSocketId) {
+    vnic::Fifo<int> fifo;
+    const vnic::Fifo<int>::Config config{.capacity = 2, .socketId = 3};
+
+    ASSERT_TRUE(fifo.configure(config).has_value());
+    EXPECT_EQ(fifo.capacity(), 2u);
+    EXPECT_EQ(fifo.socketId(), 3u);
+    EXPECT_EQ(fifo.getConfig().capacity, 2u);
+    EXPECT_EQ(fifo.getConfig().socketId, 3u);
+
+    vnic::Fifo<int> moved{std::move(fifo)};
+    EXPECT_EQ(moved.capacity(), 2u);
+    EXPECT_EQ(moved.socketId(), 3u);
+
+    vnic::Fifo<int> assigned;
+    assigned = std::move(moved);
+    EXPECT_EQ(assigned.capacity(), 2u);
+    EXPECT_EQ(assigned.socketId(), 3u);
+}
 
 TEST(FifoTest, MoveConstructTransfersElements) {
     vnic::Fifo<int> source;
@@ -377,15 +383,11 @@ TEST(FifoTest, MovedToFifoIsReusable) {
 
     vnic::Fifo<int> moved{std::move(source)};
 
-    EXPECT_TRUE(moved.push(2));
+    EXPECT_TRUE(moved.push(2).has_value());
     EXPECT_EQ(moved.size(), 2u);
     EXPECT_EQ(moved.pop(), 1);
     EXPECT_EQ(moved.pop(), 2);
 }
-
-// ---------------------------------------------------------------------------
-// Type properties / element types
-// ---------------------------------------------------------------------------
 
 TEST(FifoTest, IsMoveOnly) {
     static_assert(!std::is_copy_constructible_v<vnic::Fifo<int>>);
@@ -398,10 +400,10 @@ TEST(FifoTest, IsMoveOnly) {
 TEST(FifoTest, SupportsMoveOnlyElementType) {
     vnic::Fifo<MoveOnly> fifo;
 
-    EXPECT_TRUE(fifo.emplace(5));
+    EXPECT_TRUE(fifo.emplace(5).has_value());
     EXPECT_EQ(fifo.pop().value, 5);
 
-    EXPECT_TRUE(fifo.push(MoveOnly{6}));
+    EXPECT_TRUE(fifo.push(MoveOnly{6}).has_value());
     EXPECT_EQ(fifo.pop().value, 6);
 
     fifo.push(MoveOnly{7});
@@ -411,10 +413,6 @@ TEST(FifoTest, SupportsMoveOnlyElementType) {
     EXPECT_EQ(buffer[0].value, 7);
     EXPECT_EQ(buffer[1].value, 8);
 }
-
-// ---------------------------------------------------------------------------
-// Thread safety
-// ---------------------------------------------------------------------------
 
 TEST(FifoTest, ProducerConsumerAcrossThreadsPreservesAllElements) {
     constexpr int kCount = 1000;
@@ -433,7 +431,7 @@ TEST(FifoTest, ProducerConsumerAcrossThreadsPreservesAllElements) {
 
     producer.join();
 
-    constexpr long long kExpected = static_cast<long long>(kCount) * (kCount - 1) / 2;
+    constexpr auto kExpected = static_cast<long long>(kCount) * (kCount - 1) / 2;
     EXPECT_EQ(sum, kExpected);
     EXPECT_TRUE(fifo.isEmpty());
 }

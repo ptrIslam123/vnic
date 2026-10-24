@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include <shared_mutex>
 #include <utility>
 
@@ -59,9 +60,15 @@ public:
     }
 
     /// @brief Publish a new value (replaces the old one atomically).
-    void write(T value) {
+    void write(T&& value) {
         std::unique_lock lock{mutex_};
         value_ = std::move(value);
+    }
+
+    /// @brief Publish a new value (replaces the old one atomically).
+    void write(const T& value) {
+        std::unique_lock lock{mutex_};
+        value_ = value;
     }
 
 private:
