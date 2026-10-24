@@ -1,0 +1,4 @@
+# Paths excluded from clang-format (relative to this file).
+build/**
+dock/api/**
+**/_deps/**
